@@ -31,6 +31,12 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('routePath("api/presets")', js)
         self.assertIn("promptInput.value", js)
 
+    def test_fallback_stages_and_partial_success_rendering(self):
+        js = (ROOT / "static" / "app.js").read_text("utf-8")
+        for expected in ("local_transcription", "yuanbao_transcript", "partial",
+                         "transcript?.download_path", "下载完整口播"):
+            self.assertIn(expected, js)
+
     def test_history_missing_cover_placeholder_distinguishes_text_only_tasks(self):
         js = (ROOT / "static" / "app.js").read_text("utf-8")
         self.assertIn('job.thumbnail?.download_path', js)
