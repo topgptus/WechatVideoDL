@@ -7,7 +7,7 @@
   <a class="secondary-button" href="{{ url_for('index') }}">＋ 新建任务</a>
 </section>
 <section class="history-toolbar panel slim-panel">
-  <div class="history-search-wrap"><span>⌕</span><input id="history-filter" type="search" placeholder="按标题、任务 ID、链接或 Prompt 筛选"></div>
+  <div class="history-search-wrap"><span aria-hidden="true">⌕</span><label class="sr-only" for="history-filter">搜索历史记录</label><input id="history-filter" type="search" placeholder="按标题、任务 ID、链接或 Prompt 筛选" autocomplete="off"></div>
   <button id="refresh-history" class="text-button" type="button">刷新</button>
 </section>
 <section id="history-list" class="history-list">

@@ -34,7 +34,7 @@ class FrontendContractTests(unittest.TestCase):
     def test_history_missing_cover_placeholder_distinguishes_text_only_tasks(self):
         js = (ROOT / "static" / "app.js").read_text("utf-8")
         self.assertIn('job.thumbnail?.download_path', js)
-        self.assertIn('job.download_requested === false ? "MD Only" : "No Cover"', js)
+        self.assertIn('job.download_requested === false ? "No VIDEO" : "No Cover"', js)
         self.assertNotIn('placeholder.textContent = "VIDEO"', js)
 
     def test_history_supports_download_detail_and_confirmed_delete(self):
@@ -62,16 +62,17 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("@media", css)
         self.assertIn(".workspace-grid", css)
 
-    def test_titled_thumbnail_history_bundle_and_wechat_contract(self):
+    def test_titled_thumbnail_history_bundle_and_source_link_contract(self):
         js = (ROOT / "static" / "app.js").read_text("utf-8")
         history = (ROOT / "templates" / "history.html").read_text("utf-8")
         self.assertIn("job.title || job.id", js)
         self.assertIn("job.thumbnail?.download_path", js)
         self.assertIn("job.bundle?.download_path", js)
-        self.assertIn("下载全部", js)
-        self.assertIn("function openInWeChat", js)
+        self.assertIn('"ALL"', js)
+        self.assertIn("function copySourceLink", js)
         self.assertIn("navigator.clipboard.writeText", js)
-        self.assertIn('"weixin://"', js)
+        self.assertIn('"复制链接"', js)
+        self.assertNotIn('window.location.href = "weixin://"', js)
         self.assertIn('target = "_blank"', js)
         self.assertIn('rel = "noopener noreferrer"', js)
         self.assertIn("job.title", js[js.index("const visible = jobs.filter"):])

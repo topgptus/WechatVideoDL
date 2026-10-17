@@ -25,19 +25,21 @@
           <small>Video intelligence workspace</small>
         </span>
       </a>
-      <nav class="header-actions" aria-label="主导航">
-        <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="{{ url_for('index') }}">工作台</a>
-        <a class="nav-link {% if request.path.startswith('/history') %}active{% endif %}" href="{{ url_for('history_page') }}">历史记录</a>
-        <label class="theme-control" aria-label="主题">
+      <nav class="primary-nav" aria-label="主导航">
+        <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="{{ url_for('index') }}" {% if request.path == '/' %}aria-current="page"{% endif %}>工作台</a>
+        <a class="nav-link {% if request.path.startswith('/history') %}active{% endif %}" href="{{ url_for('history_page') }}" {% if request.path.startswith('/history') %}aria-current="page"{% endif %}>历史记录</a>
+      </nav>
+      <div class="header-utilities">
+        <label class="theme-control">
           <span>主题</span>
-          <select id="theme-select">
+          <select id="theme-select" aria-label="外观主题">
             <option value="system">跟随系统</option>
             <option value="light">明亮</option>
             <option value="dark">暗色</option>
           </select>
         </label>
         <a class="nav-link muted-link" href="{{ url_for('logout') }}">退出</a>
-      </nav>
+      </div>
     </header>
     <main class="app-main">{% block content %}{% endblock %}</main>
   </div>
