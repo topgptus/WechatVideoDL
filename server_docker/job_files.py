@@ -78,7 +78,10 @@ def write_analysis_file(download_dir: Path, job: dict[str, Any], output_format: 
             lines.append(f"- Preset: {preset_name}")
         if prompt:
             lines += ["", "## Prompt", "", prompt]
-        lines += ["", "## Yuanbao Response", "", content, ""]
+        caption = ("## 基于 SenseVoice 真实逐字稿的 AI 整理" if
+                   job.get("analysis_source") == "local_transcript"
+                   else "## Yuanbao Response")
+        lines += ["", caption, "", content, ""]
         text = "\n".join(lines)
 
     path.write_text(text, encoding="utf-8")

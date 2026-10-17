@@ -12,7 +12,7 @@ except ImportError:  # Docker executes modules from /app.
     from artifact_names import artifact_filename, artifact_stem
     from job_files import safe_owned_path
 
-_COMPONENT_KEYS = ("text_filename", "video_filename", "thumbnail_filename")
+_COMPONENT_KEYS = ("text_filename", "video_filename", "thumbnail_filename", "transcript_filename", "raw_transcript_filename", "timed_transcript_filename")
 _ALLOWED_EXTS = {"txt", "md", "mp4", "jpg"}
 
 
@@ -22,6 +22,10 @@ def _components(download_dir: Path, job: dict[str, Any]) -> list[tuple[Path, str
     stem = artifact_stem(title, job_id)
     items: list[tuple[Path, str]] = []
     for key in _COMPONENT_KEYS:
+        # Honor the actual output choice also for pre-upgrade records.
+        if (key == "raw_transcript_filename" and job.get("timed_requested")
+                and job.get("timed_transcript_filename")):
+            continue
         filename = job.get(key)
         if not filename:
             continue
@@ -31,7 +35,10 @@ def _components(download_dir: Path, job: dict[str, Any]) -> list[tuple[Path, str
         if not path.exists() or not path.is_file():
             continue
         ext = path.suffix.lower().lstrip(".")
-        items.append((path, f"{stem}.{ext}"))
+        member = f"{stem}.{Path(filename).name.split('.', 1)[-1]}" if key in {
+            "transcript_filename", "raw_transcript_filename", "timed_transcript_filename"
+        } else f"{stem}.{ext}"
+        items.append((path, member))
     if not items:
         raise FileNotFoundError("no bundle components are available")
     return items

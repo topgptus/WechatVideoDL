@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 try:
     from .artifact_names import artifact_filename, artifact_stem
+    from .content_quality import refusal_reason
     from .history_store import HistoryStore
     from .job_files import safe_owned_path, write_analysis_file
-except ImportError:  # Docker executes app modules from /app, not as a package.
+    from .raw_transcript_export import write_raw_artifacts
+    from .script_voice_export import wants_script_export, write_script_voice
+except ImportError:
     from artifact_names import artifact_filename, artifact_stem
+    from content_quality import refusal_reason
     from history_store import HistoryStore
     from job_files import safe_owned_path, write_analysis_file
+    from raw_transcript_export import write_raw_artifacts
+    from script_voice_export import wants_script_export, write_script_voice
 
 
 RETRYABLE_CODES = {
@@ -60,6 +68,18 @@ def cleanup_artifacts(download_dir: Path, filenames: Iterable[str | None]) -> No
                 pass
 
 
+def _owned_copy(source: Path, dest: Path) -> Path:
+    if source.resolve() == dest.resolve():
+        return source
+    # A hard link uses no extra disk space, and deleting either history record
+    # will not invalidate the other one's media. Fall back for other file systems.
+    try:
+        os.link(source, dest)
+    except (OSError, FileExistsError):
+        shutil.copyfile(source, dest)
+    return dest
+
+
 def run_parse_job(
     job_id: str,
     input_url: str,
@@ -75,6 +95,11 @@ def run_parse_job(
     max_attempts: int = 3,
     sleeper: Callable[[float], None] = time.sleep,
     thumbnailer: Callable[[Path, str, str | None, Path | None], Path | None] | None = None,
+    transcriber: Callable[[str, Path], tuple[str, str] | tuple[str, str, int | None]] | None = None,
+    text_analyzer: Callable[[str, str | None], str] | None = None,
+    cached_video_lookup: Callable[[str], Path | None] | None = None,
+    cached_failed_analysis: Callable[[str], dict[str, Any] | None] | None = None,
+    options: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     if thumbnailer is None:
         try:
@@ -86,107 +111,256 @@ def run_parse_job(
     started = time.monotonic()
     retry_errors: list[dict[str, Any]] = []
     max_attempts = min(3, max(1, int(max_attempts)))
+    download_dir = Path(download_dir)
+    options = options or {'analyze': True, 'narration': wants_script_export(preset, prompt),
+                          'raw': False, 'timed': False}
+    analyze_requested = bool(options.get('analyze', True))
+    raw_requested = bool(options.get('raw'))
+    timed_requested = bool(options.get('timed'))
+    narration_requested = bool(options.get('narration'))
 
     for attempt in range(1, max_attempts + 1):
         store.update_job(
-            job_id,
-            status="running",
-            attempts_used=attempt,
-            max_attempts=max_attempts,
-            retry_errors=retry_errors,
-            error_code=None,
-            error_message=None,
+            job_id, status="running", stage="yuanbao_video",
+            attempts_used=attempt, max_attempts=max_attempts,
+            retry_errors=retry_errors, error_code=None, error_message=None,
+            analysis_status="pending",
         )
         provisional: list[str | None] = []
+        temporary_video: Path | None = None
         try:
-            result = analyzer(input_url, prompt)
+            # For a known unsupported video already saved locally, skip the
+            # repeat Yuanbao video fetch and start directly with speech text.
+            previous = (cached_failed_analysis(input_url) if cached_failed_analysis and transcriber
+                        and analyze_requested and not raw_requested else None)
+            result = previous if previous is not None else analyzer(input_url, prompt)
             content = str(result.get("content") or "").strip()
             preview_url = str(result.get("previewUrl") or "").strip()
             direct_url = str(result.get("directUrl") or "").strip()
             card = result.get("card") if isinstance(result.get("card"), dict) else {}
-            video_title = str(card.get("title") or "").strip()
-            resolved_title = video_title or "微信视频号"
+            video_title = str(card.get("title") or "").strip() or "微信视频号"
             cover_url = str(card.get("coverUrl") or "").strip()
             store.update_job(
-                job_id,
-                yuanbao_content=content,
-                preview_url=preview_url,
-                source_direct_url=direct_url,
-                video_title=resolved_title,
+                job_id, yuanbao_content=content, preview_url=preview_url,
+                source_direct_url=direct_url, video_title=video_title,
                 cover_url=cover_url or None,
             )
-            job = store.get_job(job_id)
-            assert job is not None
-            stem = artifact_stem(resolved_title, job_id)
-            text_path = write_analysis_file(download_dir, job, output_format)
-            provisional.append(text_path.name)
+            stem = artifact_stem(video_title, job_id)
             video_path = None
-            if download_requested:
-                provisional.append(artifact_filename(resolved_title, job_id, "mp4"))
-                video_path = downloader(stem, direct_url, preview_url)
-                provisional.append(video_path.name)
+            transcript_filename = None
+            failure_code = refusal_reason(content) if analyze_requested else None
+            analysis_source = "yuanbao_video" if analyze_requested and not failure_code else None
+            raw_filename = None
+            timed_filename = None
+            raw_error = None
+            raw_transcript_text = None
+
+            if download_requested or failure_code or raw_requested:
+                # Reuse media only in fallback situations. Normal successes
+                # remain compatible with existing URL/download behavior.
+                cached = (cached_video_lookup(input_url) if cached_video_lookup and (failure_code or raw_requested) else None)
+                if download_requested:
+                    store.update_job(job_id, stage="downloading_video")
+                    desired = download_dir / artifact_filename(video_title, job_id, "mp4")
+                    provisional.append(desired.name)  # May be partially written before yt-dlp raises.
+                    if cached and cached.is_file():
+                        video_path = _owned_copy(cached, desired)
+                    else:
+                        video_path = downloader(stem, direct_url, preview_url)
+                    provisional.append(video_path.name)
+                    store.update_job(job_id, video_filename=video_path.name,
+                                     video_bytes=video_path.stat().st_size)
+                elif (failure_code or raw_requested) and transcriber is not None:
+                    store.update_job(job_id, stage="preparing_media")
+                    if cached and cached.is_file():
+                        temporary_video = None
+                        video_path = cached  # Existing file belongs to another task; never remove.
+                    else:
+                        # The user asked not to persist MP4; download temporarily
+                        # for local speech recognition and then delete it.
+                        provisional.append(stem + "-temporary.mp4")
+                        temporary_video = downloader(stem+"-temporary", direct_url, preview_url)
+                        video_path = temporary_video
+
+            if raw_requested:
+                store.update_job(job_id, stage="local_transcription")
+                if transcriber is None or video_path is None:
+                    raw_error = 'LOCAL_WORKER_DISABLED'
+                else:
+                    try:
+                        transcribed = transcriber(job_id, video_path)
+                        scratch_name, transcript_text = transcribed[:2]
+                        raw_transcript_text = transcript_text
+                        raw_filename, timed_filename = write_raw_artifacts(
+                            download_dir, job_id, transcript_text, output_format, timed_requested)
+                        provisional.extend([raw_filename, timed_filename])
+                        elapsed = transcribed[2] if len(transcribed) > 2 else None
+                        timing = {'transcription_elapsed_ms': elapsed} if isinstance(elapsed, int) and 0 <= elapsed <= 86_400_000 else {}
+                        if len(transcribed) > 3 and isinstance(transcribed[3], dict):
+                            timing.update({k:v for k,v in transcribed[3].items() if
+                                k in ('transcription_chunk_count', 'transcription_segment_count',
+                                      'transcription_duration_seconds') and v is not None})
+                        store.update_job(job_id, raw_transcript_filename=raw_filename,
+                                         timed_transcript_filename=timed_filename, **timing)
+                        # The queue's staging output has served its purpose.
+                        if scratch_name != raw_filename:
+                            scratch = safe_owned_path(download_dir, scratch_name)
+                            if scratch and scratch.name == f'{job_id}.transcript.txt':
+                                scratch.unlink(missing_ok=True)
+                    except Exception as exc:
+                        raw_error = str(getattr(exc, 'code', str(exc)))[:90]
+
+            if failure_code:
+                store.update_job(job_id, stage="local_transcription",
+                                 analysis_status="unavailable", error_code=failure_code,
+                                 error_message="元宝无法直接分析此视频，正在尝试本地语音转写")
+                if transcriber is not None and video_path is not None:
+                    try:
+                        if raw_transcript_text is not None:
+                            # Avoid a duplicate multi-hour ASR run when the user
+                            # requested raw transcript and Yuanbao also refused.
+                            transcript = raw_transcript_text
+                            transcript_filename = raw_filename or timed_filename
+                            transcribed = (transcript_filename, transcript)
+                        else:
+                            transcribed = transcriber(job_id, video_path)
+                            transcript_filename, transcript = transcribed[:2]
+                        elapsed = transcribed[2] if len(transcribed) > 2 else None
+                        timing = (
+                            {"transcription_elapsed_ms": elapsed}
+                            if isinstance(elapsed, int) and not isinstance(elapsed, bool)
+                            and 0 <= elapsed <= 86_400_000 else {}
+                        )
+                        store.update_job(job_id, transcript_filename=transcript_filename,
+                                         stage="yuanbao_transcript", analysis_status="pending",
+                                         **timing)
+                        if text_analyzer is not None:
+                            candidate = text_analyzer(transcript, prompt)
+                            if not refusal_reason(candidate):
+                                content = str(candidate).strip()
+                                failure_code = None
+                                analysis_source = "local_transcript"
+                                try:
+                                    from .long_video_analysis import split_asr
+                                except ImportError:
+                                    from long_video_analysis import split_asr
+                                store.update_job(job_id, analysis_chunk_count=(
+                                    len(split_asr(transcript)) if len(transcript)>12000 else 1))
+                    except Exception as exc:
+                        # A failed second stage must not erase a successfully
+                        # downloaded MP4 or a successfully produced transcript.
+                        failure_code = str(getattr(exc, "code", "FALLBACK_FAILED"))[:90]
+                if failure_code:
+                    # Never publish the original refusal as a successful Markdown.
+                    # Preserve any successful download and transcript for recovery.
+                    status = "completed" if ((video_path is not None and download_requested)
+                                              or transcript_filename or raw_filename or timed_filename) else "failed"
+                    thumbnail_path = None
+                    if cover_url or (video_path is not None and download_requested):
+                        try:
+                            thumbnail_path = thumbnailer(
+                                download_dir, artifact_filename(video_title, job_id, "jpg"),
+                                cover_url or None,
+                                video_path if download_requested else None,
+                            )
+                        except Exception:
+                            pass
+                    row = store.update_job(
+                        job_id, status=status, stage="finished",
+                        analysis_status="unavailable", analysis_source=None,
+                        error_code=failure_code,
+                        error_message="元宝未能完成分析；可下载的视频或本地逐字稿已保留" if status == "completed" else "元宝未能完成分析，本地转写尚不可用",
+                        transcript_filename=(transcript_filename if transcript_filename not in
+                                             (raw_filename, timed_filename) else None),
+                        raw_transcript_filename=raw_filename,
+                        timed_transcript_filename=timed_filename,
+                        thumbnail_filename=thumbnail_path.name if thumbnail_path else None,
+                        elapsed_ms=int((time.monotonic()-started)*1000),
+                    )
+                    assert row is not None
+                    return row
+
+            if analyze_requested:
+                store.update_job(job_id, yuanbao_content=content,
+                                 analysis_source=analysis_source, analysis_status="completed",
+                                 stage="saving_results", error_code=None, error_message=None)
+                updated = store.get_job(job_id)
+                assert updated is not None
+                text_path = write_analysis_file(download_dir, updated, output_format)
+                provisional.append(text_path.name)
+            else:
+                store.update_job(job_id, yuanbao_content=None, analysis_source=None,
+                                 analysis_status="skipped", stage="saving_results")
+                text_path = None
+            if analyze_requested and narration_requested and (transcript_filename is None or
+                                                  transcript_filename in (raw_filename, timed_filename)):
+                transcript_filename = write_script_voice(
+                    download_dir, job_id, video_title, content, output_format=output_format)
+                provisional.append(transcript_filename)
             thumbnail_path = None
-            if cover_url or video_path is not None:
-                target_thumbnail = artifact_filename(resolved_title, job_id, "jpg")
+            if cover_url or (download_requested and video_path is not None):
+                target = artifact_filename(video_title, job_id, "jpg")
                 try:
-                    thumbnail_path = thumbnailer(download_dir, target_thumbnail, cover_url or None, video_path)
+                    thumbnail_path = thumbnailer(
+                        download_dir, target, cover_url or None,
+                        video_path if download_requested else None,
+                    )
                 except Exception:
                     thumbnail_path = None
-            elapsed_ms = int((time.monotonic() - started) * 1000)
+            output_ok = bool(text_path or transcript_filename or raw_filename or timed_filename
+                             or (download_requested and video_path))
             row = store.update_job(
-                job_id,
-                status="completed",
-                attempts_used=attempt,
-                max_attempts=max_attempts,
-                retry_errors=retry_errors,
-                error_code=None,
-                error_message=None,
-                text_filename=text_path.name,
-                text_bytes=text_path.stat().st_size,
-                video_filename=video_path.name if video_path else None,
-                video_bytes=video_path.stat().st_size if video_path else None,
+                job_id, status="completed" if output_ok else "failed", stage="finished",
+                attempts_used=attempt, retry_errors=retry_errors,
+                error_code=raw_error, error_message=('原始逐字稿处理失败；其余结果已保留' if raw_error else None),
+                text_filename=text_path.name if text_path else None,
+                text_bytes=text_path.stat().st_size if text_path else None,
+                video_filename=video_path.name if download_requested and video_path else None,
+                video_bytes=video_path.stat().st_size if download_requested and video_path else None,
                 thumbnail_filename=thumbnail_path.name if thumbnail_path else None,
-                elapsed_ms=elapsed_ms,
+                transcript_filename=transcript_filename,
+                raw_transcript_filename=raw_filename, timed_transcript_filename=timed_filename,
+                elapsed_ms=int((time.monotonic()-started)*1000),
             )
             assert row is not None
             return row
+
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             summary = error_summary(exc, attempt)
-            retry_errors.append(summary)
             current = store.get_job(job_id) or {}
-            cleanup_artifacts(
-                download_dir,
-                [
-                    *provisional,
-                    current.get("text_filename"),
-                    current.get("video_filename"),
-                    current.get("thumbnail_filename"),
-                    current.get("bundle_filename"),
-                ],
-            )
-            retryable = is_retryable_error(exc)
-            final = (not retryable) or attempt >= max_attempts
+            # Preserve the actual failing stage across retries and completion.
+            # No credentials, URLs or media text enter this audit metadata.
+            summary["stage"] = str(current.get("stage") or "yuanbao_video")[:40]
+            retry_errors.append(summary)
+            cleanup_artifacts(download_dir, [
+                *provisional,
+                current.get("text_filename"), current.get("video_filename"),
+                current.get("thumbnail_filename"), current.get("transcript_filename"),
+                current.get("raw_transcript_filename"), current.get("timed_transcript_filename"),
+                current.get("bundle_filename"),
+            ])
+            final = (not is_retryable_error(exc)) or attempt >= max_attempts
             row = store.update_job(
-                job_id,
-                status="failed" if final else "running",
-                attempts_used=attempt,
-                max_attempts=max_attempts,
-                retry_errors=retry_errors,
-                error_code=summary["code"],
-                error_message=summary["message"],
-                text_filename=None,
-                text_bytes=None,
-                video_filename=None,
-                video_bytes=None,
-                thumbnail_filename=None,
-                bundle_filename=None,
-                elapsed_ms=int((time.monotonic() - started) * 1000) if final else None,
+                job_id, status="failed" if final else "running",
+                stage="finished" if final else "yuanbao_video",
+                attempts_used=attempt, retry_errors=retry_errors,
+                error_code=summary["code"], error_message=summary["message"],
+                text_filename=None, text_bytes=None, video_filename=None,
+                video_bytes=None, thumbnail_filename=None, bundle_filename=None,
+                raw_transcript_filename=None, timed_transcript_filename=None, transcript_filename=None,
+                analysis_status="unavailable" if final else "pending",
+                elapsed_ms=int((time.monotonic()-started)*1000) if final else None,
             )
             if final:
                 assert row is not None
                 return row
             sleeper(attempt)
-
+        finally:
+            if temporary_video is not None:
+                try:
+                    temporary_video.unlink(missing_ok=True)
+                except OSError:
+                    pass
     raise RuntimeError("unreachable")

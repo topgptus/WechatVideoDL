@@ -7,9 +7,11 @@ ROOT = Path(__file__).resolve().parents[1]
 class FrontendContractTests(unittest.TestCase):
     def test_frontend_has_three_theme_modes_and_persists_preference(self):
         base = (ROOT / "templates" / "base.html").read_text("utf-8")
+        settings = (ROOT / "templates" / "settings.html").read_text("utf-8")
         js = (ROOT / "static" / "app.js").read_text("utf-8")
         for theme in ["light", "dark", "system"]:
-            self.assertIn(f'value="{theme}"', base)
+            self.assertIn(f'value="{theme}"', settings)
+        self.assertIn("wvd-theme", base)
         self.assertIn("localStorage", js)
         self.assertIn("wvd-theme", js)
 
@@ -31,10 +33,16 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('routePath("api/presets")', js)
         self.assertIn("promptInput.value", js)
 
+    def test_fallback_stages_and_partial_success_rendering(self):
+        js = (ROOT / "static" / "app.js").read_text("utf-8")
+        for expected in ("local_transcription", "yuanbao_transcript", "partial",
+                         "transcript?.download_path", '"旁白"'):
+            self.assertIn(expected if expected != '"旁白"' else '"AI整理旁白"', js)
+
     def test_history_missing_cover_placeholder_distinguishes_text_only_tasks(self):
         js = (ROOT / "static" / "app.js").read_text("utf-8")
         self.assertIn('job.thumbnail?.download_path', js)
-        self.assertIn('job.download_requested === false ? "MD Only" : "No Cover"', js)
+        self.assertIn('job.download_requested === false ? "No VIDEO" : "No Cover"', js)
         self.assertNotIn('placeholder.textContent = "VIDEO"', js)
 
     def test_history_supports_download_detail_and_confirmed_delete(self):
@@ -62,27 +70,27 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("@media", css)
         self.assertIn(".workspace-grid", css)
 
-    def test_titled_thumbnail_history_bundle_and_wechat_contract(self):
+    def test_titled_thumbnail_history_bundle_and_source_link_contract(self):
         js = (ROOT / "static" / "app.js").read_text("utf-8")
         history = (ROOT / "templates" / "history.html").read_text("utf-8")
         self.assertIn("job.title || job.id", js)
         self.assertIn("job.thumbnail?.download_path", js)
         self.assertIn("job.bundle?.download_path", js)
-        self.assertIn("下载全部", js)
-        self.assertIn("function openInWeChat", js)
+        self.assertIn('"ALL"', js)
+        self.assertIn("function copySourceLink", js)
         self.assertIn("navigator.clipboard.writeText", js)
-        self.assertIn('"weixin://"', js)
+        self.assertIn('"复制链接"', js)
+        self.assertNotIn('window.location.href = "weixin://"', js)
         self.assertIn('target = "_blank"', js)
         self.assertIn('rel = "noopener noreferrer"', js)
-        self.assertIn("job.title", js[js.index("const visible = jobs.filter"):])
+        self.assertIn("job.title", js[js.index("function historyCard("):])
+        self.assertIn("URLSearchParams", js)
         self.assertIn("按标题", history)
 
     def test_async_polling_and_refresh_recovery_contract(self):
         js = (ROOT / "static" / "app.js").read_text("utf-8")
         self.assertIn('routePath("api/parse")', js)
         self.assertIn("async function watchJob", js)
-        self.assertIn("poll_interval_seconds", js)
-        self.assertNotIn("await sleep(3000)", js)
         self.assertIn("result-progress", (ROOT / "templates" / "index.html").read_text("utf-8"))
         self.assertIn('routePath(`api/history/${encodeURIComponent(jobId)}`)', js)
         self.assertIn("wvd-active-job", js)

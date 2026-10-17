@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}WechatVideoDL{% endblock %}</title>
   <script>
     (() => {
@@ -25,23 +26,33 @@
           <small>Video intelligence workspace</small>
         </span>
       </a>
-      <nav class="header-actions" aria-label="主导航">
-        <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="{{ url_for('index') }}">工作台</a>
-        <a class="nav-link {% if request.path.startswith('/history') %}active{% endif %}" href="{{ url_for('history_page') }}">历史记录</a>
-        <label class="theme-control" aria-label="主题">
-          <span>主题</span>
-          <select id="theme-select">
-            <option value="system">跟随系统</option>
-            <option value="light">明亮</option>
-            <option value="dark">暗色</option>
-          </select>
-        </label>
-        <a class="nav-link muted-link" href="{{ url_for('logout') }}">退出</a>
+      <nav class="primary-nav" aria-label="主导航">
+        <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="{{ url_for('index') }}" {% if request.path == '/' %}aria-current="page"{% endif %}>工作台</a>
+        <a class="nav-link {% if request.path.startswith('/history') %}active{% endif %}" href="{{ url_for('history_page') }}" {% if request.path.startswith('/history') %}aria-current="page"{% endif %}>历史记录</a>
+        <a class="nav-link {% if request.endpoint in ('settings_page', 'account_page', 'admin_users') %}active{% endif %}" href="{{ url_for('settings_page') }}" {% if request.endpoint in ('settings_page', 'account_page', 'admin_users') %}aria-current="page"{% endif %}>设置</a>
       </nav>
+      <div class="header-utilities">
+        {% if current_user() %}
+        <span class="signed-in-user" aria-label="当前登录账号：{{ current_user().username }}" title="当前登录账号：{{ current_user().username }}">
+          <span class="signed-in-label">当前账号</span><strong>{{ current_user().username }}</strong>
+        </span>
+        <form method="post" action="{{ url_for('logout') }}" class="header-logout-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="nav-link muted-link header-logout">退出</button>
+        </form>
+        {% endif %}
+      </div>
     </header>
     <main class="app-main">{% block content %}{% endblock %}</main>
   </div>
   {% endblock %}
+  <dialog id="video-play-dialog" class="video-play-dialog" aria-labelledby="video-play-heading">
+    <div class="video-play-heading"><strong id="video-play-heading">播放视频</strong><button id="video-play-close" type="button" class="text-button">关闭</button></div>
+    <video id="video-play-element" controls playsinline preload="metadata" aria-label="视频播放窗口"></video>
+    <p id="video-source-notice" class="video-play-error hidden" role="status"></p>
+    <p id="video-play-error" class="video-play-error hidden" role="alert">当前视频无法播放，授权链接可能已过期。请从微信中查看或重新解析。</p>
+    <p class="video-play-note">视频由本项目授权访问的内容提供；播放失败时请尝试在微信中打开原链接。</p>
+  </dialog>
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </body>
 </html>

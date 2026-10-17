@@ -74,6 +74,10 @@ http://SERVER_IP:18770/
 
 ---
 
+## 多用户登录与管理员
+
+WebUI 采用受保护的唯一超级管理员、普通管理员及普通用户三级权限。全新安装的首位管理员自动成为超级管理员；已有多用户数据库首次升级时可通过私有 SUPERADMIN_BOOTSTRAP_USERNAME 指定现有管理员（默认 WEBUI_USERNAME）。首次绑定成功后按数据库用户 ID 固定身份，修改配置不会转移权限。普通管理员不能重置、停用或降级超级管理员；本人需验证当前密码才能改密。历史任务与下载文件按提交者隔离。详见 [多用户及超级管理员安全指南](../docs/MULTI-USER-SECURITY.md)。
+
 ## 2. Cookie 与 Session
 
 ### Cookie
@@ -186,7 +190,6 @@ PROXY_HOPS=1
 
 MAX_PARSE_ATTEMPTS=3
 MAX_PENDING_JOBS=8
-POLL_INTERVAL_SECONDS=3
 ```
 
 ### 环境变量
@@ -203,7 +206,6 @@ POLL_INTERVAL_SECONDS=3
 | `PROXY_HOPS` | `1` | 可信 proxy 层数 |
 | `MAX_PARSE_ATTEMPTS` | `3` | 最多总尝试次数 |
 | `MAX_PENDING_JOBS` | `8` | 同时运行与排队任务的总上限（单 Browserless worker） |
-| `POLL_INTERVAL_SECONDS` | `3` | 服务端建议的异步任务轮询间隔；返回到 JSON 与 `Retry-After`，限制 1～30 秒 |
 | `BROWSERLESS_URL` | 自动 | 外部 Browserless，可选 |
 | `BROWSERLESS_IMAGE` | 固定默认 | Browserless 镜像覆盖 |
 | `BROWSER_TIMEOUT` | `300` | 元宝浏览器自动化最长等待（秒）；应大于视频卡片等待 110 秒及后续解析时间 |
@@ -390,25 +392,56 @@ bundle.download_url
 curl -u 'USERNAME:PASSWORD' http://SERVER_IP:18770/api/presets
 ```
 
+### 任务模式、独立旁白与 SenseVoice
+
+工作台支持「仅下载 MP4」「仅生成旁白」「仅 AI 解析」「完整处理」及自定义组合。
+文本产物默认 Markdown（`.md`），用户可在工作台切换 TXT。视频仍保存为 MP4。
+选择原始逐字稿时，通过本机私有队列调用 **SenseVoice INT8**，不经过 AI 文案改写；
+时间轴选项依据 SenseVoice 实际识别窗口的时间戳生成，不伪造更高精度。
+若用户关闭「保存 MP4」，语音识别所需的媒体仅作为临时输入使用，任务结束即清理。
+
+| 产物 | 后缀 | 来源 |
+| --- | --- | --- |
+| 视频 | `.mp4` | 微信视频号原视频 |
+| AI 内容解析 | `.md` / `.txt` | 腾讯元宝分析 |
+| AI 整理版旁白 | `.narration-ai.md` / `.txt` | 腾讯元宝整理的口播脚本；不是逐字稿 |
+| 原始逐字稿 | `.transcript-raw.md` / `.txt` | SenseVoice 语音识别文本 |
+| 带时间轴逐字稿 | `.transcript-timed.md` / `.txt` | SenseVoice 实际识别时间窗 |
+
+本项目**不再调用 Whisper 作为兜底**；即使宿主机安装了 Whisper，亦不自动使用。
+宿主机已有的 Whisper 软件、虚拟环境和模型缓存不会被本项目卸载或删除，其他项目照常使用。
+
+首次启用 SenseVoice 需要先在本机预装模型、配置私有 LaunchAgent 并确认转写 worker 心跳：
+
+```bash
+python3 scripts/setup_host_transcriber.py \
+  --data-dir ./data --python /path/to/worker-python \
+  --model sensevoice --sensevoice-python /private/sensevoice-venv/bin/python \
+  --sensevoice-model-dir /private/sensevoice-model
+# 预演通过后追加 --install，确认心跳，再在私有 .env 设置 LOCAL_TRANSCRIPTION_ENABLED=true。
+```
+
+识别得到的音频文本可能存在错误，应核对关键原话。需要进一步 AI 整理时，转写后的文字会交给腾讯元宝，故不是全程离线。
+旧任务、旧 `/api/parse` 客户端及历史下载链接保留兼容；旧旁白 TXT 不做强制改名。
+历史页支持 10 / 20 / 50 / 100 条/页、跨页搜索、批量选中与一次确认后删除；
+文件删除遵守用户归属和共享文件引用关系，运行中的任务不允许删除。
+
 ### 异步提交与进度查询（HTTP 202）
 
 `POST /api/parse` 在通过输入验证并成功入队后**立即返回 HTTP 202**，包含
-`id`、`poll_url`、`poll_interval_seconds` 和初始的 `queued` / `running` 状态，不再等待元宝解析或 MP4 下载。
-响应同时带 `Location` 与 `Retry-After`；客户端应优先按照服务端返回的轮询间隔调用
-`GET /api/history/<id>`，不要把 3 秒写死在自己的实现里。状态依次为
-`queued`、`running`、`completed` 或 `failed`。完成后，`job.text.download_path`、
-`job.video.download_path`、缩略图和 bundle 路径提供实际成果。
+`id`、`poll_url` 和初始的 `queued` / `running` 状态，不再等待元宝解析或 MP4 下载。
+客户端随后每隔约 3 秒调用 `GET /api/history/<id>`；响应中的 `job.status`
+依次为 `queued`、`running`、`completed` 或 `failed`。状态为 `completed`
+时，`job.text.download_path`、`job.video.download_path` 等提供实际成果。
+工作台刷新后会用本地保存的任务 ID 自动恢复轮询；历史记录也会显示当前任务。
 
-队列满时返回 JSON `429 QUEUE_FULL`，并同样带 `Retry-After`，客户端可据此延后重试。
 单进程 Gunicorn（Dockerfile 默认 `-w 1`）使用一条后台线程串行执行，最多允许
-`MAX_PENDING_JOBS` 个正在运行或排队的任务。运行中的任务不可删除（`409 JOB_ACTIVE`）。
-浏览器断线不会中止后台任务，但**容器重启或进程退出不会自动恢复进行中的任务**：启动时这些任务会标记
+`MAX_PENDING_JOBS` 个正在运行或排队的任务；超出返回 JSON `429 QUEUE_FULL`。
+运行中的任务不可删除（`409 JOB_ACTIVE`）。浏览器断线不会中止后台任务，
+但**容器重启或进程退出不会自动恢复进行中的任务**：启动时这些任务会标记
 `INTERRUPTED`，用户可在历史记录核实后重新提交。为避免任务丢失，不要在运行任务时部署升级；
 需要跨容器重启可靠恢复的场景应另用持久化工作队列。
 
-### History
-
-```bash
 curl -u 'USERNAME:PASSWORD' http://SERVER_IP:18770/api/history
 curl -u 'USERNAME:PASSWORD' http://SERVER_IP:18770/api/history/wxv_000001
 ```

@@ -104,6 +104,13 @@ module.exports = async ({ page, context }) => {
     throw new Error("YUANBAO_LOGIN_REQUIRED:" + initialBody.slice(0, 500));
   }
 
+  // Yuanbao restores a previously opened chat on the root URL. Explicitly
+  // open a fresh conversation to avoid silently posting into old history.
+  const newChat = await page.$('[aria-label="New Chat"]');
+  if (!newChat) throw new Error("YUANBAO_NEW_CHAT_UNAVAILABLE");
+  await page.click('[aria-label="New Chat"]');
+  await sleep(900);
+
   const editor = '[contenteditable="true"]';
   await page.waitForSelector(editor, { timeout: 30000 });
   await page.click(editor);
@@ -114,7 +121,7 @@ module.exports = async ({ page, context }) => {
   }
   await sleep(300);
   let editorText = await page.$eval(editor, (el) => (el.innerText || el.textContent || "").trim());
-  if (!editorText) {
+  if (editorText !== requestText) {
     await page.evaluate(
       (selector, text) => {
         const el = document.querySelector(selector);
@@ -135,9 +142,26 @@ module.exports = async ({ page, context }) => {
     await sleep(200);
     editorText = await page.$eval(editor, (el) => (el.innerText || el.textContent || "").trim());
   }
-  if (!editorText) throw new Error("YUANBAO_EDITOR_EMPTY");
+  if (editorText !== requestText) throw new Error("YUANBAO_EDITOR_MISMATCH");
   await page.waitForSelector("#yuanbao-send-btn", { timeout: 10000 });
+  // Observe only in-browser booleans; never log the submitted prompt or chat.
+  const before = await page.evaluate((needle) => {
+    const t = document.querySelector("#chat-content")?.innerText || "";
+    return t.split(needle).length - 1;
+  }, requestText);
   await page.click("#yuanbao-send-btn");
+  let messageAcknowledged = false;
+  const sendDeadline = Date.now() + 15000;
+  while (Date.now() < sendDeadline) {
+    messageAcknowledged = await page.evaluate(({ needle, previous }) => {
+      const content = document.querySelector("#chat-content")?.innerText || "";
+      const occurrences = content.split(needle).length - 1;
+      return occurrences > previous;
+    }, { needle: requestText, previous: before });
+    if (messageAcknowledged) break;
+    await sleep(500);
+  }
+  if (!messageAcknowledged) throw new Error("YUANBAO_SEND_UNCONFIRMED");
   // Video-card generation is often slower on the first Yuanbao request.
   // Previously the fixed 65s cutoff made a second identical chat request
   // necessary. Allow more time without blocking the HTTP client (async API).
@@ -158,7 +182,7 @@ module.exports = async ({ page, context }) => {
   let previous = "";
   let stable = 0;
   const answerDeadline = Date.now() + 125000;
-  while (Date.now() < answerDeadline) {
+  while (!context?.extractOnly && Date.now() < answerDeadline) {
     await sleep(2000);
     rawContent = await page.evaluate(() => document.querySelector("#chat-content")?.innerText || "");
     if (rawContent.includes("微信扫码登录") || rawContent.includes("请使用微信扫描二维码登录")) {

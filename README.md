@@ -664,16 +664,9 @@ curl http://SERVER_IP:18770/health
   "ok": true,
   "browserless": true,
   "cookie_file": true,
-  "busy": false,
-  "async_jobs": true,
-  "max_pending_jobs": 8,
-  "worker_model": "single-process",
-  "queue_persistent": false,
-  "poll_interval_seconds": 3
+  "busy": false
 }
 ```
-
-这些字段同时告诉 API/Agent 客户端当前实例采用单进程内存队列、队列不会跨容器重启恢复，以及建议的轮询间隔。
 
 ---
 
@@ -875,49 +868,40 @@ curl -u 'USERNAME:PASSWORD' \
   }'
 ```
 
-## 11.3 异步返回与轮询
-
-`POST /api/parse` 成功入队后立即返回 **HTTP 202**，不会等待元宝分析或 MP4 下载完成：
+## 11.3 返回示例
 
 ```json
 {
   "ok": true,
   "id": "wxv_000012",
-  "status": "queued",
-  "poll_url": "/api/history/wxv_000012",
-  "poll_interval_seconds": 3
-}
-```
-
-响应同时包含：
-
-```text
-Location: /api/history/wxv_000012
-Retry-After: 3
-Cache-Control: no-store
-```
-
-客户端应按照 `poll_interval_seconds` / `Retry-After` 查询 `GET /api/history/<id>`，直到 `status` 为 `completed` 或 `failed`。队列已满时返回 `429 QUEUE_FULL`，并带 `Retry-After`，客户端可延后重试。
-
-完成后的 history 详情会返回标题化附件，例如：
-
-```json
-{
-  "ok": true,
-  "job": {
-    "id": "wxv_000012",
-    "title": "视频标题",
-    "status": "completed",
-    "poll_interval_seconds": 3,
-    "text": {"filename": "视频标题__000012.md", "download_path": "/files/视频标题__000012.md"},
-    "video": {"filename": "视频标题__000012.mp4", "download_path": "/files/视频标题__000012.mp4"},
-    "thumbnail": {"filename": "视频标题__000012.jpg", "download_path": "/files/视频标题__000012.jpg"},
-    "bundle": {"download_path": "/api/history/wxv_000012/bundle"}
+  "status": "completed",
+  "attempts_used": 2,
+  "max_attempts": 3,
+  "retry_errors": [
+    {
+      "attempt": 1,
+      "code": "VIDEO_URL_MISSING",
+      "message": "没有解析到真实视频 URL"
+    }
+  ],
+  "input_url": "https://weixin.qq.com/sph/...",
+  "prompt": "总结核心内容",
+  "output_format": "md",
+  "content": "元宝返回的内容...",
+  "text": {
+    "filename": "wxv_000012.md",
+    "download_path": "/files/wxv_000012.md",
+    "download_url": "https://video.example.com/files/wxv_000012.md"
+  },
+  "video": {
+    "filename": "wxv_000012.mp4",
+    "download_path": "/files/wxv_000012.mp4",
+    "download_url": "https://video.example.com/files/wxv_000012.mp4"
   }
 }
 ```
 
-前端和 Agent 客户端优先使用服务端返回的相对 `download_path`，所以无论访问 IP、域名还是反代路径都更稳定。
+前端优先使用 `download_path`，所以无论访问 IP、域名还是反代路径，都更稳定。
 
 ## 11.4 Prompt 预设
 

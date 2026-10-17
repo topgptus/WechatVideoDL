@@ -72,18 +72,15 @@ class ParseApiTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail(f"Job {job_id} did not finish in {timeout}s")
 
-    def test_omitted_output_format_defaults_to_txt(self):
+    def test_omitted_output_format_defaults_to_md(self):
         r = self.post({"url": "https://weixin.qq.com/sph/demo", "download": False})
         self.assertEqual(r.status_code, 202)
-        body = self.await_job(r.get_json()["id"])
         self.assertEqual(r.headers["Location"], f"/api/history/{r.get_json()['id']}")
         self.assertEqual(r.headers["Cache-Control"], "no-store")
-        self.assertEqual(r.headers["Retry-After"], "3")
-        self.assertEqual(r.get_json()["poll_interval_seconds"], 3)
         self.assertTrue(r.get_json()["ok"])
-        self.assertTrue(body["text"]["filename"].endswith(".txt"))
-        self.assertEqual(body["output_format"], "txt")
-        self.assertEqual(body["poll_interval_seconds"], 3)
+        body = self.await_job(r.get_json()["id"])
+        self.assertTrue(body["text"]["filename"].endswith(".md"))
+        self.assertEqual(body["output_format"], "md")
 
     def test_markdown_output_and_retry_metadata_and_proxy_safe_links(self):
         r = self.post({
@@ -104,6 +101,17 @@ class ParseApiTests(unittest.TestCase):
         self.assertRegex(body["text"]["download_path"], r"^/files/Demo__\d{6}\.md$")
         self.assertTrue(body["text"]["download_url"].startswith("http://localhost/files/"))
         self.assertRegex(body["video"]["download_path"], r"^/files/Demo__\d{6}\.mp4$")
+
+    def test_history_api_includes_optional_transcription_duration(self):
+        r = self.post({"url": "https://weixin.qq.com/sph/demo", "download": False})
+        body = self.await_job(r.get_json()["id"])
+        self.assertIn("transcription_elapsed_ms", body)
+        self.assertIsNone(body["transcription_elapsed_ms"])
+        appmod.HISTORY_STORE.update_job(body["id"], transcription_elapsed_ms=187500)
+        updated = self.client.get(f"/api/history/{body['id']}", headers=self.auth()).get_json()["job"]
+        self.assertEqual(updated["transcription_elapsed_ms"], 187500)
+        history = self.client.get("/api/history", headers=self.auth()).get_json()["jobs"]
+        self.assertEqual(history[0]["transcription_elapsed_ms"], 187500)
 
     def test_invalid_output_format_returns_json_400_without_analyzer(self):
         calls = []
@@ -196,7 +204,6 @@ class ParseApiTests(unittest.TestCase):
             second = self.post({"url": "https://weixin.qq.com/sph/second", "download": False})
             self.assertEqual(second.status_code, 429)
             self.assertEqual(second.get_json()["error"]["code"], "QUEUE_FULL")
-            self.assertEqual(second.headers["Retry-After"], "3")
             blocker.set()
             self.assertEqual(self.await_job(first.get_json()["id"])["status"], "completed")
             self.assertEqual(len(appmod.HISTORY_STORE.list_jobs()), 1)
