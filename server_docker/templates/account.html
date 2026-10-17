@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}我的账号 · WechatVideoDL{% endblock %}
+{% block page %}account{% endblock %}
+{% block content %}
+<section class="page-intro account-intro">
+  <div><span class="eyebrow">ACCOUNT</span><h1>我的账号</h1><p>修改你的登录密码。完成后会退出当前会话，使用新密码重新登录。</p></div>
+</section>
+<section class="panel account-panel">
+  <div class="panel-heading"><div><h2>账号信息</h2></div></div>
+  <p>用户名：<strong>{{ current_user().username }}</strong>
+    <span class="status-badge completed">{{ '超级管理员' if current_user().is_superadmin else ('管理员' if current_user().role == 'admin' else '普通用户') }}</span></p>
+  {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
+  {% if message %}<div class="alert" role="status">{{ message }}</div>{% endif %}
+  <form method="post" action="{{ url_for('account_password') }}" class="account-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>当前密码<input name="current_password" type="password" required autocomplete="current-password"></label>
+    <label>新密码（至少 8 个字符）<input name="new_password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
+    <label>再次输入新密码<input name="confirm_password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
+    <button class="primary-button full" type="submit">修改密码并重新登录</button>
+  </form>
+</section>
+{% endblock %}

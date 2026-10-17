@@ -27,7 +27,13 @@
   }
 
   async function safeFetch(url, options = {}) {
-    const response = await fetch(url, options);
+    const method = String(options.method || "GET").toUpperCase();
+    const headers = new Headers(options.headers || {});
+    if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+      const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+      if (csrf) headers.set("X-CSRF-Token", csrf);
+    }
+    const response = await fetch(url, {...options, headers});
     const contentType = (response.headers.get("content-type") || "").toLowerCase();
     const raw = await response.text();
     if (!contentType.includes("application/json")) {

@@ -18,10 +18,11 @@
   </section>
   <section class="login-panel">
     <form class="login-card" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="section-kicker">欢迎回来</div>
       <h2>登录工作台</h2>
-      <p class="subtle">使用服务器配置的 WebUI 账号继续。</p>
-      <label>用户名<input name="username" autocomplete="username" required autofocus></label>
+      <p class="subtle">使用你的账号与密码登录，访问属于自己的任务与内容。</p>
+      <label>用户名<input name="username" autocomplete="username" required></label>
       <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
       {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
       <button class="primary-button full" type="submit">进入 WechatVideoDL</button>

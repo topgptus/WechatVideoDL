@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}用户管理 · WechatVideoDL{% endblock %}
+{% block page %}users{% endblock %}
+{% block content %}
+<section class="page-intro account-intro">
+  <div><span class="eyebrow">ADMINISTRATION</span><h1>用户管理</h1>
+    <p>只有管理员可以创建账号、分配权限或重置密码。普通用户只能访问自己的任务和文件。</p>
+  </div>
+</section>
+{% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
+{% if message %}<div class="alert success" role="status">{{ message }}</div>{% endif %}
+<section class="panel account-panel">
+  <div class="panel-heading"><div><h2>创建新用户</h2></div></div>
+  <form method="post" action="{{ url_for('admin_create_user') }}" class="account-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>用户名<input name="username" required maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off" placeholder="英文字母、数字、点、下划线或连字符"></label>
+    <label>初始密码（至少 8 个字符）<input name="password" required type="password" minlength="8" maxlength="256" autocomplete="new-password"></label>
+    <label>角色<select name="role" class="select-input"><option value="member">普通用户（仅自己的历史与文件）</option><option value="admin">管理员（管理全部历史和用户）</option></select></label>
+    <button class="primary-button full" type="submit">创建用户</button>
+  </form>
+</section>
+<section class="user-directory">
+  <h2>现有用户</h2>
+  {% for user in users %}
+  <article class="panel user-card">
+    <div class="user-heading"><strong>{{ user.username }}</strong>
+      <span class="status-badge {{ 'completed' if user.active else 'failed' }}">{{ '已启用' if user.active else '已停用' }}</span>
+      <small>{{ '超级管理员 · 受保护' if user.is_superadmin else ('管理员' if user.role == 'admin' else '普通用户') }}</small>
+    </div>
+    <div class="user-actions">
+      {% if not user.is_superadmin %}
+      <form method="post" action="{{ url_for('admin_reset_password', uid=user.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>设置新密码<input name="password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
+        <label>确认新密码<input name="confirm_password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
+        <button class="secondary-button" type="submit">重置密码</button>
+      </form>
+      {% endif %}
+      {% if user.is_superadmin %}
+      <p class="user-self-note user-protected-note" role="note">此账号为系统唯一超级管理员。其他管理员无法重置密码、调整权限或停用；该超级管理员本人可在「我的账号」验证当前密码后自行修改密码。</p>
+      {% elif user.id != current_user().id %}
+      <form method="post" action="{{ url_for('admin_change_role', uid=user.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>权限<select name="role" class="select-input"><option value="member" {% if user.role == 'member' %}selected{% endif %}>普通用户</option><option value="admin" {% if user.role == 'admin' %}selected{% endif %}>管理员</option></select></label>
+        <button class="secondary-button" type="submit">更新权限</button>
+      </form>
+      <form method="post" action="{{ url_for('admin_set_active', uid=user.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="active" value="{{ '0' if user.active else '1' }}">
+        <button class="danger-button" type="submit">{{ '停用账号' if user.active else '启用账号' }}</button>
+      </form>
+      {% else %}
+      <p class="user-self-note">当前登录账号。为防止失去管理权限，不能在此停用或降级自己。</p>
+      {% endif %}
+    </div>
+  </article>
+  {% endfor %}
+</section>
+{% endblock %}
