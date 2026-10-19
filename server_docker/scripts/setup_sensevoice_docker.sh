@@ -20,7 +20,15 @@ mkdir -p data/downloads data/transcription_queue
 # Prevent two workers claiming jobs from the same queue. Existing Docker
 # worker (our own service) can be safely reconfigured using this script.
 if [[ -f data/transcription_queue/worker.status.json ]]; then
-  if python3 - <<'PY'
+  # Heartbeats created by a rootful container are intentionally mode 0600:
+  # host gt may be unable to read one, which must not be mistaken for idle.
+  if [[ ! -r data/transcription_queue/worker.status.json ]]; then
+    CID="$("${DOCKER[@]}" ps -q sensevoice)"
+    if [[ -z "$CID" ]]; then
+      echo "A private worker heartbeat exists but cannot be inspected. Refusing to start a second worker." >&2
+      exit 3
+    fi
+  elif python3 - <<'PY'
 import json,time
 from pathlib import Path
 try:
@@ -44,23 +52,31 @@ echo "Building optional isolated ASR worker..."
 echo "Starting isolated worker (no network, no host Docker socket, no credentials mount)..."
 "${DOCKER[@]}" up -d --no-deps sensevoice
 echo "Waiting for fresh, ready worker heartbeat..."
-python3 - <<'PY'
+ready=false
+for attempt in $(seq 1 45); do
+  # Read through the existing container boundary: its private 0600
+  # heartbeat must not be made world-readable just for host-side setup.
+  if "${DOCKER[@]}" exec -T sensevoice python -c '
 import json,sys,time
 from pathlib import Path
-status=Path("data/transcription_queue/worker.status.json")
-for _ in range(45):
-    try:
-        s=json.loads(status.read_text())
-        if s.get("ready") is True and s.get("model") == "sensevoice" and abs(time.time()-float(s["at"])) <= 10:
-            print("SenseVoice worker is ready")
-            break
-    except (FileNotFoundError,ValueError,TypeError,KeyError):
-        pass
-    time.sleep(2)
-else:
-    print("Worker did not become ready. Examine Docker container logs; WebUI was not changed.",file=sys.stderr)
-    sys.exit(4)
-PY
+try:
+    s=json.loads(Path("/data/transcription_queue/worker.status.json").read_text())
+    if s.get("ready") is True and s.get("model") == "sensevoice" and abs(time.time()-float(s["at"])) <= 10:
+        sys.exit(0)
+except (OSError,ValueError,TypeError,KeyError):
+    pass
+sys.exit(1)
+' >/dev/null 2>&1; then
+    echo "SenseVoice worker is ready"
+    ready=true
+    break
+  fi
+  sleep 2
+done
+if ! "$ready"; then
+  echo "Worker did not become ready. Examine Docker container logs; WebUI was not changed." >&2
+  exit 4
+fi
 if ! "$ENABLE_APP"; then
   echo "Worker installed. Enable the app when ready by rerunning with --enable-app."
   exit 0

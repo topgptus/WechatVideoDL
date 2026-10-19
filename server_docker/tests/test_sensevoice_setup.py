@@ -156,6 +156,8 @@ class SenseVoiceSetupTests(unittest.TestCase):
         script = (ROOT / "scripts/setup_sensevoice_docker.sh").read_text("utf-8")
         self.assertIn("--enable-app",script)
         self.assertIn("install_sensevoice_model.py",script)
+        self.assertIn('exec -T sensevoice python',script)
+        self.assertIn('cannot be inspected',script)
         self.assertNotIn("down -v",script)
 
 
