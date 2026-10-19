@@ -14,7 +14,13 @@ def refusal_reason(value: str | None) -> str | None:
     text = str(value or "").strip()
     if not text:
         return "YUANBAO_EMPTY_RESPONSE"
-    # Never classify a long, valid explanation that quotes a refusal.
+    # Yuanbao sometimes responds with a *long* generic knowledge note after
+    # explicitly admitting it never read the video. Inspect only its opening;
+    # do not treat a genuine discussion that later quotes an error as refusal.
+    lead = text[:420]
+    if (re.search(r"^(?:我这边|我尝试|抱歉|目前|当前).{0,170}(?:视频解析失败|无法解析|无法读取|视频不可读)", lead, re.S)
+            and re.search(r"(?:没有拿到|未能获取|无法取得|没有获取|兜底|补发视频)", lead)):
+        return "YUANBAO_VIDEO_NOT_READ"
     if len(text) > 180:
         return None
     return "YUANBAO_CONTENT_UNAVAILABLE" if any(p.fullmatch(text) for p in _REFUSAL_PATTERNS) else None
