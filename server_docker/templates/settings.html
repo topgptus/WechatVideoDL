@@ -16,6 +16,7 @@
     <span class="settings-nav-caption">管理工具</span>
     <a href="#users" data-settings-target="users" class="settings-nav-link {{ 'is-active' if active_section == 'users' else '' }}" {{ 'aria-current="location"' if active_section == 'users' else '' }}>用户管理</a>
     <a href="#yuanbao" data-settings-target="yuanbao" class="settings-nav-link {{ 'is-active' if active_section == 'yuanbao' else '' }}" {{ 'aria-current="location"' if active_section == 'yuanbao' else '' }}>元宝连接</a>
+    <a href="#sensevoice" data-settings-target="sensevoice" class="settings-nav-link {{ 'is-active' if active_section == 'sensevoice' else '' }}" {{ 'aria-current="location"' if active_section == 'sensevoice' else '' }}>语音识别</a>
     {% endif %}
   </nav>
   <div class="settings-content">
@@ -132,6 +133,23 @@
         <div class="settings-action-row"><div><strong>连接诊断</strong><p class="settings-help">只读检查 · 需要约数秒</p></div>
         <button id="yuanbao-diagnostic-button" class="secondary-button" type="button">检查元宝连接</button></div>
         <div id="yuanbao-diagnostic-result" role="status" aria-live="polite" aria-atomic="true" class="settings-diagnostic-results">尚未检查。点击按钮获取最新状态。</div>
+      </div>
+    </section>
+    <section id="sensevoice" class="settings-pane {{ 'is-active' if active_section == 'sensevoice' else '' }}" data-settings-panel="sensevoice" aria-labelledby="sensevoice-title">
+      <div class="settings-pane-heading"><h2 id="sensevoice-title">SenseVoice 语音识别</h2><p>离线处理视频语音。安装服务只需管理员在部署服务器执行一次，所有用户共用转写队列。</p></div>
+      <div class="panel settings-card">
+        <div class="credential-head"><strong>本地转写服务</strong><span id="sensevoice-state" class="status-badge {{ 'completed' if sensevoice_status.ready else 'failed' }}">{{ '就绪' if sensevoice_status.ready else ('尚未启用' if not sensevoice_status.enabled else '未就绪') }}</span></div>
+        <p id="sensevoice-message" class="settings-help" role="status" aria-live="polite">{{ sensevoice_status.message }}</p>
+        <div class="settings-action-row"><p class="settings-help">引擎：SenseVoice INT8 · 数据在部署设备本地处理 · 不使用云端 ASR</p><button type="button" id="sensevoice-check-button" class="secondary-button">刷新服务状态</button></div>
+      </div>
+      <div class="panel settings-card">
+        <strong>Linux / Docker 安装</strong>
+        <p class="settings-help">使用可选 worker 容器：先在部署服务器上进入 <code>server_docker</code>，再执行以下命令。安装程序会下载官方模型、单独构建 worker 并校验健康状态；确认后才启用主程序。</p>
+        <pre class="settings-command"><code>./scripts/setup_sensevoice_docker.sh --enable-app</code></pre>
+        <p class="settings-help">不想立即重启应用？省略 <code>--enable-app</code>，先只安装并检查 worker。安装时需要网络、约 1GB 以上的空余磁盘和额外 CPU/内存。</p>
+        <strong>macOS 已有 worker</strong>
+        <p class="settings-help">继续使用现有 launchd worker，不需要重复安装；请勿同时开启 Docker worker 与 macOS worker，否则会争抢同一队列。按现有部署说明配置模型后再启用主程序。</p>
+        <p class="settings-help">出于安全考虑，网页无权限运行 Docker、下载模型或安装系统软件。具体说明见项目文档 <code>docs/SENSEVOICE-SETUP.md</code>。</p>
       </div>
     </section>
     {% endif %}

@@ -1,0 +1,41 @@
+name: WechatVideoDL checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# No secrets and no write access; never run untrusted PR code with
+# pull_request_target or a privileged GitHub token.
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: server_docker/requirements.txt
+      - name: Install application test dependencies
+        run: python -m pip install -r server_docker/requirements.txt
+      - name: Python regression suite (no live accounts required)
+        run: python -m unittest discover -s server_docker/tests -q
+      - name: Python and JavaScript syntax
+        run: |
+          python -m compileall -q server_docker
+          node --check server_docker/static/app.js
+          node --check server_docker/browserless_function.js
+      - name: Default and optional Docker Compose configuration
+        env:
+          BROWSERLESS_TOKEN: test-only-placeholder
+          WEBUI_USERNAME: ci-user
+          WEBUI_PASSWORD: test-only-password
+          SECRET_KEY: test-only-secret
+        run: |
+          docker compose -f server_docker/docker-compose.yml config --quiet
+          docker compose -f server_docker/docker-compose.yml -f server_docker/docker-compose.sensevoice.yml --profile sensevoice config --quiet

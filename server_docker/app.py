@@ -38,6 +38,7 @@ try:
     from .yuanbao_credentials import (parse_netscape_cookies, parse_session, atomic_import,
                                       credential_status, CredentialImportError, MAX_COOKIES_BYTES, MAX_SESSION_BYTES)
     from .batch_input import collect_video_urls
+    from .sensevoice_status import sensevoice_status
 except ImportError:  # Docker runs modules from /app.
     from content_quality import refusal_reason
     from transcription_queue import transcribe_with_host, TranscriptionError
@@ -52,6 +53,7 @@ except ImportError:  # Docker runs modules from /app.
     from yuanbao_credentials import (parse_netscape_cookies, parse_session, atomic_import,
                                     credential_status, CredentialImportError, MAX_COOKIES_BYTES, MAX_SESSION_BYTES)
     from batch_input import collect_video_urls
+    from sensevoice_status import sensevoice_status
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data")).resolve()
@@ -831,7 +833,7 @@ def render_settings(active_section="account", *, account_error=None, account_mes
                     users_error=None, users_message=None,
                     yuanbao_error=None, yuanbao_message=None, status=200):
     user = current_user()
-    if active_section in {"users", "yuanbao"} and user["role"] != "admin":
+    if active_section in {"users", "yuanbao", "sensevoice"} and user["role"] != "admin":
         active_section = "account"
     return render_template("settings.html", active_section=active_section,
                            users=get_user_store().list_users() if user["role"] == "admin" else [],
@@ -839,13 +841,23 @@ def render_settings(active_section="account", *, account_error=None, account_mes
                            users_error=users_error, users_message=users_message,
                            yuanbao_error=yuanbao_error, yuanbao_message=yuanbao_message,
                            yuanbao_status=(credential_status(COOKIE_FILE, SESSION_FILE)
-                                           if user['role']=='admin' else None)), status
+                                           if user['role']=='admin' else None),
+                           sensevoice_status=(sensevoice_status(DATA_DIR, LOCAL_TRANSCRIPTION_ENABLED)
+                                              if user['role']=='admin' else None)), status
 
 
 @app.route("/settings")
 @api_or_session_required
 def settings_page():
     return render_settings()
+
+@app.route("/api/admin/sensevoice-status")
+@admin_required
+def admin_sensevoice_status():
+    response = jsonify({"ok": True, "sensevoice": sensevoice_status(DATA_DIR, LOCAL_TRANSCRIPTION_ENABLED)})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 
 
 @app.route("/account")

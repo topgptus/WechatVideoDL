@@ -824,6 +824,21 @@
     }
     selectPane(location.hash.slice(1) || shell.dataset.initialSection || "account");
     window.addEventListener("hashchange", () => selectPane(location.hash.slice(1)));
+    const voiceCheck = $("sensevoice-check-button");
+    voiceCheck?.addEventListener("click", async () => {
+      const state = $("sensevoice-state"), message = $("sensevoice-message");
+      voiceCheck.disabled = true;
+      message.textContent = "正在检查本地转写服务…";
+      try {
+        const result = await safeFetch(routePath("api/admin/sensevoice-status"));
+        const voice = result.sensevoice || {};
+        state.textContent = voice.ready ? "就绪" : (voice.enabled ? "未就绪" : "尚未启用");
+        state.classList.toggle("completed", !!voice.ready);
+        state.classList.toggle("failed", !voice.ready);
+        message.textContent = voice.message || "无法读取服务状态";
+      } catch (error) { message.textContent = "检查失败：" + error.message; }
+      finally { voiceCheck.disabled = false; }
+    });
     const button = $("yuanbao-diagnostic-button");
     if (!button) return;
     button.addEventListener("click", async () => {

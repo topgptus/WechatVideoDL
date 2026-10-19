@@ -252,6 +252,21 @@ def main():
     data_dir = Path(args.data_dir).expanduser().resolve(strict=True)
     if not (data_dir / "downloads").is_dir():
         raise SystemExit("Invalid WechatVideoDL data directory")
+    # Never announce readiness for a worker missing its offline dependencies
+    # or model. This is particularly important on first-time installations.
+    python = Path(os.environ.get("LOCAL_ASR_SENSEVOICE_PYTHON", ""))
+    model_dir = Path(os.environ.get("LOCAL_ASR_SENSEVOICE_MODEL_DIR", ""))
+    if (not python.is_file() or not os.access(python, os.X_OK) or
+            not model_dir.is_dir() or model_dir.is_symlink() or
+            not (model_dir / "model.int8.onnx").is_file() or
+            not (model_dir / "tokens.txt").is_file()):
+        raise SystemExit("SENSEVOICE_NOT_CONFIGURED")
+    try:
+        subprocess.run([str(python), "-c", "import numpy, sherpa_onnx"],
+                       timeout=30, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit("SENSEVOICE_RUNTIME_UNAVAILABLE") from exc
     queue = data_dir / "transcription_queue"
     queue.mkdir(mode=0o700, exist_ok=True)
     os.chmod(queue, 0o700)

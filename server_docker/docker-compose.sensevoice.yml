@@ -1,0 +1,28 @@
+# Optional overlay. Activate only after model installation and app config.
+# docker compose -f docker-compose.yml -f docker-compose.sensevoice.yml --profile sensevoice up -d --no-deps sensevoice
+services:
+  sensevoice:
+    profiles: ["sensevoice"]
+    build:
+      context: .
+      dockerfile: Dockerfile.sensevoice
+    restart: unless-stopped
+    network_mode: "none"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 3g
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    volumes:
+      # Only videos, ASR outputs and its private queue; NEVER mount Cookies,
+      # Session, auth.db or the entire application data directory.
+      - ./data/downloads:/data/downloads:rw
+      - ./data/transcription_queue:/data/transcription_queue:rw
+      - ./models/sensevoice:/models/sensevoice:ro
+    environment:
+      LOCAL_ASR_SENSEVOICE_PYTHON: /usr/local/bin/python
+      LOCAL_ASR_SENSEVOICE_MODEL_DIR: /models/sensevoice
+      LOCAL_ASR_FALLBACK_BASE: "false"
+    command: ["python", "scripts/host_transcription_worker.py", "--data-dir", "/data", "--model", "sensevoice"]

@@ -1,0 +1,18 @@
+# Optional offline SenseVoice worker. Not part of the standard app image.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    OMP_NUM_THREADS=4 \
+    OPENBLAS_NUM_THREADS=4 \
+    LOCAL_ASR_SENSEVOICE_PYTHON=/usr/local/bin/python \
+    LOCAL_ASR_SENSEVOICE_MODEL_DIR=/models/sensevoice
+
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+# Separate dependencies: normal downloads do not install or download ASR.
+RUN pip install --no-cache-dir --only-binary=:all: numpy==2.2.6 sherpa-onnx==1.13.8
+COPY scripts/host_transcription_worker.py scripts/sensevoice_engine.py ./scripts/
+CMD ["python", "scripts/host_transcription_worker.py", "--data-dir", "/data", "--model", "sensevoice"]

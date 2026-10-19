@@ -22,3 +22,19 @@
 - 运行 JavaScript/Python 语法检查、Docker Compose 配置验证和独立构建检查。
 - 从最新 main 对照改动文件清单与测试结果，防止旧 PR 删除上游已合并的内容。
 - 不部署至用户的正式或测试服务器；上游合并单独确认。
+
+
+## 本轮 SenseVoice 可选安装增量
+
+- 新增可选 `docker-compose.sensevoice.yml` 和 `Dockerfile.sensevoice`，支持 Linux Docker 离线 worker。
+- `scripts/install_sensevoice_model.py` 以官方固定 Release URL 下载并校验 archive，无执行远端脚本；模型不进入 Git。
+- `scripts/setup_sensevoice_docker.sh` 为宿主管理员按需执行的安装引导，默认不更改 app，`--enable-app` 在 worker 就绪后才修改私有配置。
+- 管理员设置页面新增「语音识别」只读就绪检查，检查实际心跳，不展示服务器路径、账户或 Session。
+- 不给 WebUI 赋予 Docker Socket、宿主机命令执行、模型下载或额外网络服务权限；Mac 现有 worker 保留。
+
+## GitHub 自动回归检查
+
+为减少人工单点验证，新增只读 GitHub Actions 工作流。
+在 Pull Request 和 main 推送时运行 Python 测试、语法和双 Compose 配置检查。
+使用 pull_request（不是 pull_request_target）与 contents: read，不读取真实凭据或生产数据。
+模型文件和模型下载均不是自动测试的前置条件。
