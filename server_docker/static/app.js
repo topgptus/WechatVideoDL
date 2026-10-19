@@ -120,7 +120,13 @@
       $("result-id").textContent = data.id || "—";
       $("result-attempts").textContent = `${data.attempts_used || 1} / ${data.max_attempts || 3}`;
       $("result-format").textContent = (data.output_format || "txt").toUpperCase();
-      analysisContent.textContent = data.content || "";
+      const transcriptionTime = fmtTranscriptionDuration(data.transcription_elapsed_ms);
+      const timingElement = $("result-transcription-time");
+      timingElement.classList.toggle("hidden", !transcriptionTime);
+      timingElement.textContent = transcriptionTime ? `本地转写耗时：${transcriptionTime}` : "";
+      analysisContent.textContent = data.analysis_status === "unavailable"
+        ? (data.error_message || "元宝无法完成视频内容分析，请查看已保存的视频或口播文件。")
+        : (data.content || "");
       technicalJson.textContent = JSON.stringify(data, null, 2);
       retryNotice.classList.toggle("hidden", !(data.retry_errors || []).length);
       retryNotice.textContent = (data.retry_errors || []).length
@@ -167,9 +173,10 @@
           if (!data) { showError("无法读取任务状态，请到历史记录查看。"); return; }
           if (data.source_url) videoUrl.value = data.source_url;
           technicalJson.textContent = JSON.stringify(data, null, 2);
-          if (data.status === "completed") {
+          if (data.status === "completed" || data.status === "partial") {
             localStorage.removeItem(activeJobKey);
             showResult(data);
+            if (data.status === "partial") setStatus(resultStatus, "部分完成", "partial");
             return;
           }
           if (data.status === "failed") {
@@ -179,9 +186,17 @@
           }
           const queued = data.status === "queued";
           setStatus(resultStatus, queued ? "排队中" : "处理中", "running");
-          progressTitle.textContent = queued ? `任务 ${jobId} 排队中` : `任务 ${jobId} 正在解析`;
+          const stages = {
+            yuanbao_video: "元宝解析视频中",
+            local_transcription: "本地语音转写中",
+            yuanbao_transcript: "元宝分析口播文本中",
+            saving_results: "保存成果中"
+          };
+          progressTitle.textContent = queued ? `任务 ${jobId} 排队中`
+            : `任务 ${jobId} · ${stages[data.stage] || "正在解析"}`;
           progressDetail.textContent = queued ? "等待浏览器空闲，任务会自动开始。"
-            : `第 ${data.attempts_used || 1} / ${data.max_attempts || 3} 次尝试 · 即使关闭页面也会继续。`;
+            : (data.stage === "local_transcription" ? "长视频正在本地转写，可能需要数分钟；可以关闭页面。"
+              : `第 ${data.attempts_used || 1} / ${data.max_attempts || 3} 次尝试 · 即使关闭页面也会继续。`);
           const pollSeconds = Math.max(1, Number(data.poll_interval_seconds) || 3);
           await sleep(pollSeconds * 1000);
         }

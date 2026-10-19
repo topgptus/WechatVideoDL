@@ -390,6 +390,79 @@ bundle.download_url
 curl -u 'USERNAME:PASSWORD' http://SERVER_IP:18770/api/presets
 ```
 
+### 长视频：元宝优先，本地免费转写兜底（可选）
+
+遇到腾讯元宝明确回复“抱歉，未找到相关视频”等拒绝内容时，不能将非空回复误判为分析成功。
+新任务保持现有 HTTP 202 异步接口：先由元宝获取视频卡片和真实播放地址，元宝能分析成功就直接保存。
+只有元宝分析无效，且启用了本地转写组件时，才进入以下流程：
+
+1. 优先复用同一视频号分享链接已经下载的本地 MP4，避免重新下载；
+   没有本地文件时才按原视频地址下载。用户关闭 MP4 保存时，文件只临时使用，处理完成后删除。
+2. Mac 宿主机通过**私有共享目录任务队列**执行免费 Whisper 中文转写；不对外监听端口，不授权 Docker Socket。
+3. 将中文逐字稿按原 Prompt 交给元宝执行文本分析。长文本会分段处理再汇总。
+4. 分别保留完整转写原文（TXT）与 AI 分析（MD/TXT）；**AI 分析不是逐字转写**。
+   历史页与任务结果中的“本地转写耗时”来自宿主机工作进程的真实计时，
+   **包括音轨提取、本地模型识别和逐字稿写入，不包括视频下载或元宝二次分析**。
+   未使用本地转写的任务不显示该耗时，旧历史如果没有可信记录则保持空白。
+   历史列表的“口播原文”按钮直接下载未经过元宝精修的本地识别 TXT；
+   元宝根据 Prompt 生成的 MD/TXT 会重新提炼观点和组织结构，不能理解为只去掉口头禅的精修稿。
+5. 若下载成功但 AI 分析未完成，前端显示“部分完成”；保留成功的 MP4 或逐字稿，
+   不会用“未找到视频”冒充正常分析结果。
+
+此功能默认**关闭**，仅部署了宿主机服务并完成验证的 Mac 可设置
+`LOCAL_TRANSCRIPTION_ENABLED=true`。示例安装步骤（只面向 macOS）：
+
+```bash
+# 在 Mac 宿主机，先安装免费 openai-whisper、FFmpeg，并缓存 base 模型；
+# Whisper Python 应使用实际安装该库的 Python 可执行文件。
+python3 scripts/setup_host_transcriber.py   --data-dir ./data --python /path/to/whisper-python
+python3 scripts/setup_host_transcriber.py   --data-dir ./data --python /path/to/whisper-python --install
+# 确认 data/transcription_queue/worker.status.json 有最新心跳后，
+# 编辑私有 .env 设 LOCAL_TRANSCRIPTION_ENABLED=true，再用 deploy.sh 部署。
+```
+
+恢复/卸载（不删除已有 MP4、Markdown 或逐字稿）：
+
+```bash
+python3 scripts/setup_host_transcriber.py   --data-dir ./data --python /path/to/whisper-python --uninstall
+# 同时把 .env 的 LOCAL_TRANSCRIPTION_ENABLED 改回 false。
+```
+
+**运行限制**：当前本地 worker 默认 `base` 模型，依赖 Mac Metal/MPS 及本地可用模型；
+宿主机转写长视频可能耗时数分钟到几十分钟，且模型转写可能出现错字，须核对关键原话。
+AI 分析步骤仍会把**转写文本发送给腾讯元宝**，因此不是全程离线。
+
+**SenseVoice INT8 中文转写（可选、默认不开启）**：可以在本地环境选择 SenseVoice INT8 与 Whisper `base` 对照，
+根据实际语音和硬件评估准确率、标点与速度。
+此路线用 sherpa-onnx 的**隔离 Python 环境和预先缓存的量化模型**运行，
+不下载模型、不开放网络端口，无需额外的设备管理连接器。
+分段采用约 20 秒窗口、1 秒重叠，保存带时间戳的未经 AI 改写的原始文本。
+质量状态为未人工核对（`unverified`），不能保证全量转写完全正确。
+
+生产环境首次启用时应先验证宿主机中的隔离依赖和模型，再安装
+`--model sensevoice` 的独立 LaunchAgent，并把私有 `.env` 中
+`LOCAL_TRANSCRIPTION_MODEL` 改为 `sensevoice`。在这之前默认仍为 `base`。
+安装示例（以下路径全部是占位符，不是真实设备路径）：
+
+```bash
+python3 scripts/setup_host_transcriber.py \
+  --data-dir ./data --python /path/to/whisper-python \
+  --model sensevoice \
+  --sensevoice-python /private/sensevoice-venv/bin/python \
+  --sensevoice-model-dir /private/sensevoice-model \
+  --fallback-base
+# 上一条无 --install 为预演；检查通过后在原命令末尾加 --install。
+# 必须先确认宿主 worker 心跳、模型可用和真实样例输出，再切换 App 的 .env。
+```
+
+如 SenseVoice 异常且显式设置了 `--fallback-base`，宿主工作进程会退回
+旧 Whisper `base` 转写；不会自动修改 NPM、其他 Docker 容器或用户历史记录。
+任务执行的临时 FLAC 音频和中间识别片段位于受限临时目录，成功或失败后清理。
+**用户上传的视频在本地被转写，而转写后的文字仍按用户原有 Prompt 交给元宝分析。**
+
+生产任务进程或 Mac 重启时，和现有异步队列一样不承诺自动续跑；已存储的独立成果不会被故意删除。
+宿主机 worker 私有目录文件权限为 0600/0700，日志不会记录完整转写文本或登录 Cookie。
+
 ### 异步提交与进度查询（HTTP 202）
 
 `POST /api/parse` 在通过输入验证并成功入队后**立即返回 HTTP 202**，包含

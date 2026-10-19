@@ -12,7 +12,7 @@ except ImportError:  # Docker executes modules from /app.
     from artifact_names import artifact_filename, artifact_stem
     from job_files import safe_owned_path
 
-_COMPONENT_KEYS = ("text_filename", "video_filename", "thumbnail_filename")
+_COMPONENT_KEYS = ("text_filename", "video_filename", "thumbnail_filename", "transcript_filename")
 _ALLOWED_EXTS = {"txt", "md", "mp4", "jpg"}
 
 
@@ -31,7 +31,8 @@ def _components(download_dir: Path, job: dict[str, Any]) -> list[tuple[Path, str
         if not path.exists() or not path.is_file():
             continue
         ext = path.suffix.lower().lstrip(".")
-        items.append((path, f"{stem}.{ext}"))
+        member = f"{stem}.transcript.txt" if key == "transcript_filename" else f"{stem}.{ext}"
+        items.append((path, member))
     if not items:
         raise FileNotFoundError("no bundle components are available")
     return items
