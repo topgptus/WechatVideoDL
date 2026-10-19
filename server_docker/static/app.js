@@ -50,6 +50,13 @@
     try { return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)); }
     catch (_) { return value; }
   }
+  function fmtTranscriptionDuration(value) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "";
+    const seconds = value / 1000;
+    if (seconds < 60) return `${seconds.toFixed(1)} 秒`;
+    const whole = Math.round(seconds);
+    return `${Math.floor(whole / 60)} 分 ${String(whole % 60).padStart(2, "0")} 秒`;
+  }
   function setStatus(el, text, kind = "idle") {
     if (!el) return; el.textContent = text; el.className = `status-badge ${kind}`;
   }
@@ -119,9 +126,10 @@
       retryNotice.textContent = (data.retry_errors || []).length
         ? `任务曾遇到 ${data.retry_errors.length} 次临时错误，后台已自动恢复。` : "";
       downloadLinks.replaceChildren();
-      if (data.bundle?.download_path) downloadLinks.appendChild(downloadLink(data.bundle.download_path, "下载全部"));
-      if (data.text?.download_path) downloadLinks.appendChild(downloadLink(data.text.download_path, `下载 ${(data.output_format || "txt").toUpperCase()}`));
-      if (data.video?.download_path) downloadLinks.appendChild(downloadLink(data.video.download_path, "下载 MP4"));
+      if (data.bundle?.download_path) downloadLinks.appendChild(downloadLink(data.bundle.download_path, "ALL", "all"));
+      if (data.text?.download_path) downloadLinks.appendChild(downloadLink(data.text.download_path, "AI解析", "analysis"));
+      if (data.transcript?.download_path) downloadLinks.appendChild(downloadLink(data.transcript.download_path, "旁白", "voice"));
+      if (data.video?.download_path) downloadLinks.appendChild(downloadLink(data.video.download_path, "MP4", "video"));
     }
 
     async function watchJob(jobId) {
@@ -216,8 +224,16 @@
     $("copy-content")?.addEventListener("click", async () => { if (analysisContent.textContent) await navigator.clipboard.writeText(analysisContent.textContent); });
   }
 
-  function downloadLink(path, label) {
-    const a = document.createElement("a"); a.className = "download-pill"; a.href = path; a.textContent = label; return a;
+  function downloadLink(path, label, kind = "") {
+    const a = document.createElement("a");
+    a.className = `download-pill${kind ? ` action-${kind}` : ""}`;
+    a.href = path;
+    a.textContent = label;
+    if (kind === "all") a.title = "下载当前任务的全部文件";
+    if (kind === "analysis") a.title = "下载 AI 解析结果";
+    if (kind === "voice") a.title = "下载原始旁白逐字稿（未经 AI 改写）";
+    if (kind === "video") a.title = "下载 MP4 视频";
+    return a;
   }
 
   function sourceLink(url, label = "打开原链接") {
@@ -227,18 +243,36 @@
     return a;
   }
 
-  async function openInWeChat(url) {
-    let copied = false;
-    try { await navigator.clipboard.writeText(url); copied = true; }
-    catch (_) { copied = false; }
-    if (!copied) window.prompt("请复制视频号链接，然后在微信中打开：", url);
-    window.location.href = "weixin://";
+  async function copySourceLink(url, button) {
+    // A generic weixin:// URL has no video target and can silently fail on Mac.
+    // Copy the actual source URL instead; this also works with desktop WeChat.
+    try {
+      await navigator.clipboard.writeText(url);
+      if (button) {
+        const prior = button.textContent;
+        button.textContent = "已复制";
+        button.setAttribute("aria-label", "视频号链接已复制");
+        window.setTimeout(() => {
+          if (button.isConnected) {
+            button.textContent = prior;
+            button.setAttribute("aria-label", prior);
+          }
+        }, 2200);
+      }
+    } catch (_) {
+      // Browsers without Clipboard permission still give the user a URL
+      // they can manually copy; do not claim it was copied.
+      window.prompt("复制以下视频号链接，在微信中粘贴打开：", url);
+    }
   }
 
-  function wechatButton(url) {
+  function copySourceButton(url) {
     const button = document.createElement("button");
-    button.className = "text-button wechat-button"; button.type = "button"; button.textContent = "微信打开";
-    button.addEventListener("click", () => openInWeChat(url));
+    button.className = "text-button copy-source-button";
+    button.type = "button";
+    button.textContent = "复制链接";
+    button.setAttribute("aria-label", "复制视频号原链接");
+    button.addEventListener("click", () => copySourceLink(url, button));
     return button;
   }
 
@@ -246,7 +280,43 @@
     if (!container) return;
     container.replaceChildren();
     if (!url) return;
-    container.append(sourceLink(url), wechatButton(url));
+    // History may contain archived input strings; never create executable
+    // javascript: or custom-protocol links from these values.
+    try {
+      const parsed = new URL(url);
+      if (!["http:", "https:"].includes(parsed.protocol)) return;
+    } catch (_) { return; }
+    container.append(sourceLink(url, "浏览器打开"), copySourceButton(url));
+  }
+
+  function conciseHistoryTitle(fullTitle) {
+    const normalized = String(fullTitle || "").replace(/\s+/gu, " ").trim();
+    const chars = Array.from(normalized);
+    const maxLength = 36;
+    if (chars.length <= maxLength) return normalized;
+    const excerpt = chars.slice(0, maxLength).join("");
+    // First complete meaningful clause, without fabricating a new summary.
+    // Short introductory commas should not hide the actual subject.
+    const sentence = [...excerpt.matchAll(/[。！？!?；;]/gu)]
+      .find((match) => match.index >= 13 && match.index <= 31);
+    const clause = [...excerpt.matchAll(/[，,：:]/gu)]
+      .find((match) => match.index >= 14 && match.index <= 28);
+    const boundary = sentence || clause;
+    const prefix = boundary
+      ? excerpt.slice(0, boundary.index).trim()
+      : excerpt.trimEnd();
+    return prefix.replace(/[，,：:；;。！？!?]+$/gu, "") + "…";
+  }
+
+  function compactHistoryDate(value) {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return fmtDate(value);
+    // Historical dates are presented consistently in Beijing time.
+    return new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false
+    }).format(date);
   }
 
   async function initHistory() {
@@ -276,30 +346,101 @@
       const img = document.createElement("img"); img.className = "history-thumbnail"; img.src = job.thumbnail.download_path; img.alt = `${titleText} 缩略图`; visual.appendChild(img);
     } else {
       const placeholder = document.createElement("div"); placeholder.className = "history-thumbnail-placeholder";
-      placeholder.textContent = job.download_requested === false ? "MD Only" : "No Cover";
+      placeholder.textContent = job.download_requested === false ? "No VIDEO" : "No Cover";
       visual.appendChild(placeholder);
     }
     const main = document.createElement("div"); main.className = "history-main";
-    const heading = document.createElement("h3"); heading.className = "history-title"; heading.textContent = titleText;
-    const top = document.createElement("div"); top.className = "history-topline";
-    const id = document.createElement("span"); id.className = "history-id"; id.textContent = job.id;
-    const badge = document.createElement("span"); setStatus(badge, job.status === "completed" ? "已完成" : job.status === "failed" ? "失败" : job.status === "queued" ? "排队中" : "进行中", job.status === "queued" ? "running" : job.status);
-    const date = document.createElement("span"); date.className = "history-date"; date.textContent = fmtDate(job.created_at);
-    top.append(id, badge, date);
-    const sourceActions = document.createElement("div"); sourceActions.className = "source-actions history-source-actions";
-    renderSourceActions(sourceActions, job.source_url || job.input_url || "");
-    const prompt = document.createElement("p"); prompt.className = "history-prompt"; prompt.textContent = job.prompt || "未设置 Prompt";
-    main.append(heading, top, sourceActions, prompt);
-    const actions = document.createElement("div"); actions.className = "history-actions";
-    if (job.bundle?.download_path) actions.appendChild(downloadLink(job.bundle.download_path, "下载全部"));
-    if (job.text?.download_path) actions.appendChild(downloadLink(job.text.download_path, `下载 ${(job.output_format || "txt").toUpperCase()}`));
-    if (job.video?.download_path) actions.appendChild(downloadLink(job.video.download_path, "MP4"));
-    const detailBtn = document.createElement("button"); detailBtn.className = "text-button"; detailBtn.type = "button"; detailBtn.textContent = "详情";
+    const heading = document.createElement("h3"); heading.className = "history-title";
+    const shorterTitle = conciseHistoryTitle(titleText);
+    heading.textContent = shorterTitle;
+    heading.title = titleText;
+    heading.setAttribute("aria-label", titleText);
+
+    const meta = document.createElement("div"); meta.className = "history-meta";
+    const badge = document.createElement("span");
+    setStatus(badge, job.status === "completed" ? "已完成" : job.status === "failed" ? "失败" : job.status === "partial" ? "部分完成" : job.status === "queued" ? "排队中" : "进行中", job.status === "queued" ? "running" : job.status);
+
+    const date = document.createElement("time");
+    date.className = "history-created";
+    date.textContent = compactHistoryDate(job.created_at);
+    date.dateTime = job.created_at || "";
+    date.title = "创建时间（北京时间）：" + (Number.isNaN(new Date(job.created_at).getTime())
+      ? String(job.created_at || "—")
+      : new Intl.DateTimeFormat("zh-CN", {
+          timeZone: "Asia/Shanghai", year: "numeric", month: "long",
+          day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false
+        }).format(new Date(job.created_at)));
+    meta.append(badge, date);
+    const transcriptionTime = fmtTranscriptionDuration(job.transcription_elapsed_ms);
+    if (transcriptionTime) {
+      const timing = document.createElement("span"); timing.className = "history-asr-time";
+      timing.textContent = "转写 " + transcriptionTime;
+      timing.title = "本地音轨提取、语音识别与文本保存耗时；不包含元宝分析或视频下载";
+      meta.appendChild(timing);
+    }
+    const id = document.createElement("code");
+    id.className = "history-job-id";
+    id.textContent = job.id;
+    id.title = "任务 ID：" + job.id;
+    id.setAttribute("aria-label", "任务 ID：" + job.id);
+    meta.appendChild(id);
+    main.append(heading, meta);
+    const actions = document.createElement("div"); actions.className = "history-actions"; actions.setAttribute("role", "group"); actions.setAttribute("aria-label", "任务操作");
+    // Preserve the user's exact visual and keyboard order. Unavailable
+    // files are skipped rather than turning into broken download links.
+    if (job.bundle?.download_path) actions.appendChild(downloadLink(job.bundle.download_path, "ALL", "all"));
+    if (job.text?.download_path) actions.appendChild(downloadLink(job.text.download_path, "AI解析", "analysis"));
+    if (job.transcript?.download_path) actions.appendChild(downloadLink(job.transcript.download_path, "旁白", "voice"));
+    if (job.video?.download_path) actions.appendChild(downloadLink(job.video.download_path, "MP4", "video"));
+    const detailBtn = document.createElement("button"); detailBtn.className = "text-button history-detail-button"; detailBtn.type = "button"; detailBtn.textContent = "详情";
     const del = document.createElement("button"); del.className = "danger-button"; del.type = "button"; del.textContent = "删除";
     if (job.status === "queued" || job.status === "running") { del.disabled = true; del.title = "任务完成后才可删除"; }
     actions.append(detailBtn, del); card.append(visual, main, actions);
-    const detail = document.createElement("div"); detail.className = "history-detail hidden"; const pre = document.createElement("pre"); detail.appendChild(pre); card.appendChild(detail);
-    detailBtn.addEventListener("click", async () => { if (!detail.classList.contains("hidden")) { detail.classList.add("hidden"); return; } try { const data = await safeFetch(routePath(`api/history/${encodeURIComponent(job.id)}`)); pre.textContent = data.job.content || data.job.error_message || "没有文本内容"; detail.classList.remove("hidden"); } catch (e) { pre.textContent = e.message; detail.classList.remove("hidden"); } });
+    const detail = document.createElement("div"); detail.id = "history-detail-" + job.id; detail.className = "history-detail hidden";
+    detailBtn.setAttribute("aria-controls", detail.id); detailBtn.setAttribute("aria-expanded", "false");
+
+    const info = document.createElement("dl"); info.className = "history-detail-info";
+    const detailRow = (label, build) => {
+      const row = document.createElement("div"); row.className = "history-info-row";
+      const dt = document.createElement("dt"); dt.textContent = label;
+      const dd = document.createElement("dd");
+      build(dd);
+      row.append(dt, dd); info.appendChild(row);
+    };
+    detailRow("完整标题", (dd) => { dd.textContent = titleText; });
+    detailRow("原视频链接", (dd) => {
+      const url = job.source_url || job.input_url || "";
+      if (url) {
+        const address = document.createElement("span");
+        address.className = "history-source-url"; address.textContent = url;
+        dd.appendChild(address);
+        const links = document.createElement("div");
+        links.className = "source-actions history-detail-source";
+        renderSourceActions(links, url);
+        dd.appendChild(links);
+      } else { dd.textContent = "无来源链接"; }
+    });
+    detailRow("本次 Prompt", (dd) => {
+      dd.className = "history-prompt-full";
+      dd.textContent = job.prompt || "未设置 Prompt";
+    });
+
+    const contentTitle = document.createElement("h4"); contentTitle.textContent = "AI 解析内容";
+    const pre = document.createElement("pre");
+    detail.append(info, contentTitle, pre);
+    card.appendChild(detail);
+
+    detailBtn.addEventListener("click", async () => {
+      if (!detail.classList.contains("hidden")) {
+        detail.classList.add("hidden"); detailBtn.setAttribute("aria-expanded", "false"); return;
+      }
+      detail.classList.remove("hidden"); detailBtn.setAttribute("aria-expanded", "true");
+      pre.textContent = "正在加载内容…";
+      try {
+        const data = await safeFetch(routePath("api/history/" + encodeURIComponent(job.id)));
+        pre.textContent = data.job.content || data.job.error_message || "没有文本内容";
+      } catch (e) { pre.textContent = e.message; }
+    });
     del.addEventListener("click", async () => { if (!window.confirm(`确定删除《${titleText}》及其关联文件吗？此操作不可恢复。`)) return; del.disabled = true; try { await safeFetch(routePath(`api/history/${encodeURIComponent(job.id)}`), { method: "DELETE" }); await reload(); } catch (e) { window.alert(e.message); del.disabled = false; } });
     return card;
   }
