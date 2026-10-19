@@ -8,7 +8,7 @@
 <section class="panel account-panel">
   <div class="panel-heading"><div><h2>账号信息</h2></div></div>
   <p>用户名：<strong>{{ current_user().username }}</strong>
-    <span class="status-badge completed">{{ '管理员' if current_user().role == 'admin' else '普通用户' }}</span></p>
+    <span class="status-badge completed">{{ '超级管理员' if current_user().is_superadmin else ('管理员' if current_user().role == 'admin' else '普通用户') }}</span></p>
   {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
   {% if message %}<div class="alert" role="status">{{ message }}</div>{% endif %}
   <form method="post" action="{{ url_for('account_password') }}" class="account-form">
