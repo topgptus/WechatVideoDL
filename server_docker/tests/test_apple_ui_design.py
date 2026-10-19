@@ -14,7 +14,7 @@ class AppleUIDesignTests(unittest.TestCase):
         segment = js.split(
             'const actions = document.createElement("div"); actions.className = "history-actions"'
         )[1].split('const detail = document.createElement("div")')[0]
-        labels = ['"ALL"', '"AI解析"', '"旁白"', '"MP4"', '"详情"', '"删除"']
+        labels = ['"ALL"', '"AI解析"', '"AI整理旁白"', '"MP4"', '"详情"', '"删除"']
         offsets = [segment.index(label) for label in labels]
         self.assertEqual(offsets, sorted(offsets))
         expected_mapping = [
@@ -33,7 +33,7 @@ class AppleUIDesignTests(unittest.TestCase):
     def test_workspace_uses_matching_download_semantics(self):
         js = self.source("static/app.js")
         segment = js.split('downloadLinks.replaceChildren();')[1].split('    }', 1)[0]
-        labels = ['"ALL"', '"AI解析"', '"旁白"', '"MP4"']
+        labels = ['"ALL"', '"AI解析"', '"AI整理旁白"', '"MP4"']
         offsets = [segment.index(label) for label in labels]
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn('data.transcript?.download_path', segment)
@@ -52,7 +52,7 @@ class AppleUIDesignTests(unittest.TestCase):
         self.assertIn('id.setAttribute("aria-label", "任务 ID："', js)
         self.assertIn('timeZone: "Asia/Shanghai"', js)
         # Source and Prompt must not appear in the default visible card body.
-        card_start = js.index('  function historyCard(job, reload) {')
+        card_start = js.index('  function historyCard(job, reload, selection = null) {')
         compact = js[card_start:js.index('    const actions = document.createElement("div");',card_start)]
         self.assertNotIn("renderSourceActions", compact)
         self.assertNotIn('history-prompt', compact)
@@ -63,7 +63,7 @@ class AppleUIDesignTests(unittest.TestCase):
         js = self.source("static/app.js")
         self.assertIn("function copySourceLink", js)
         self.assertIn("navigator.clipboard.writeText(url)", js)
-        self.assertIn('"浏览器打开"', js)
+        self.assertIn('"在微信中查看"', js)
         self.assertIn('"复制链接"', js)
         self.assertIn('window.prompt("复制以下视频号链接', js)
         self.assertNotIn('window.location.href = "weixin://"', js)
@@ -89,7 +89,9 @@ class AppleUIDesignTests(unittest.TestCase):
         self.assertIn('aria-current="page"', base)
         self.assertIn('class="primary-nav"', base)
         self.assertIn('class="header-utilities"', base)
-        self.assertIn('aria-label="外观主题"', base)
+        # Theme control moved from the global header into the settings page.
+        settings = self.source("templates/settings.html")
+        self.assertIn('aria-label="外观主题"', settings)
         self.assertIn('for="history-filter"', history)
         self.assertNotIn('autofocus', login)
         self.assertIn('autocomplete="current-password"', login)

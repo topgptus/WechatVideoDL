@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local-only Whisper worker for WechatVideoDL.
+"""Local-only SenseVoice worker for WechatVideoDL.
 
 No listening TCP port or Docker socket. Communicates through a private,
 shared-volume queue. The script itself never receives Yuanbao credentials.
@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -22,6 +24,26 @@ from typing import Callable
 
 JOB_ID = re.compile(r"^wxv_\d{6}$")
 MODEL_CACHE = {}
+
+
+def ensure_private_queue(queue: Path) -> None:
+    """Reject unsafe queue access without requiring CAP_FOWNER on host volumes.
+
+    In rootful Docker, the host's private bind-mount directory is owned by the
+    deployment account rather than container UID 0. The worker can operate
+    through a tightly scoped DAC_OVERRIDE capability without chmod'ing a
+    directory it does not own.
+    """
+    if queue.is_symlink():
+        raise ValueError("UNSAFE_QUEUE_DIRECTORY")
+    queue.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if queue.is_symlink() or not queue.is_dir():
+        raise ValueError("UNSAFE_QUEUE_DIRECTORY")
+    attrs = queue.stat()
+    if attrs.st_uid == os.geteuid():
+        os.chmod(queue, 0o700)
+    elif stat.S_IMODE(attrs.st_mode) & 0o077:
+        raise ValueError("UNSAFE_QUEUE_PERMISSIONS")
 
 
 def atomic_json(path: Path, obj: dict) -> None:
@@ -71,98 +93,100 @@ def sensevoice_transcriber(video: Path) -> str:
     staging_root = video.parent.parent / "transcription_queue"
     if staging_root.is_symlink() or not staging_root.is_dir():
         raise RuntimeError("SENSEVOICE_STAGING_UNAVAILABLE")
-    with tempfile.TemporaryDirectory(prefix=".sensevoice-", dir=staging_root) as directory:
-        staging = Path(directory)
-        audio = staging / "source.flac"
+    # Persistent, per-job private staging allows a multi-hour video to resume
+    # at the last validated 30-minute group after a worker restart.
+    match = re.search(r'(?:wxv_|__)(\d{6})$', video.stem)
+    # Legacy test fixtures and older artifact names may not include a job ID.
+    # Bind their private staging to a deterministic media pathname digest.
+    staging_key = ("wxv_" + match.group(1)) if match else (
+        "file_" + hashlib.sha256(str(video.resolve()).encode()).hexdigest()[:16])
+    staging = staging_root / (".sensevoice-" + staging_key)
+    if staging.is_symlink():
+        raise RuntimeError("SENSEVOICE_STAGING_UNAVAILABLE")
+    staging.mkdir(mode=0o700, exist_ok=True)
+    audio = staging / "source.flac"
+    source_signature = {"size": video.stat().st_size, "mtime_ns": video.stat().st_mtime_ns}
+    source_marker = staging / "source.json"
+    if source_marker.exists():
+        if json.loads(source_marker.read_text("utf-8")) != source_signature:
+            raise RuntimeError("SENSEVOICE_SOURCE_CHANGED")
+    else:
+        if audio.exists():
+            raise RuntimeError("SENSEVOICE_SOURCE_CHANGED")
+        pending = staging / ".source.flac.pending"
+        pending.unlink(missing_ok=True)
         converted = subprocess.run(
             ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-n",
              "-i", str(video), "-vn", "-ar", "16000", "-ac", "1",
-             "-c:a", "flac", str(audio)],
+             "-c:a", "flac", "-f", "flac", str(pending)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300,
         )
-        if converted.returncode or not audio.is_file() or audio.stat().st_size < 4096:
+        if converted.returncode or not pending.is_file() or pending.stat().st_size < 4096:
             raise RuntimeError("SENSEVOICE_AUDIO_EXTRACT_FAILED")
-        os.chmod(audio, 0o600)
-        result_dir = staging / "output"
-        result_dir.mkdir(mode=0o700)
-        runner = subprocess.Popen(
-            [str(python), str(engine)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+        os.chmod(pending, 0o600)
+        os.replace(pending, audio)
+        source_marker.write_text(json.dumps(source_signature), encoding="utf-8")
+        os.chmod(source_marker, 0o600)
+    result_dir = staging / "output"
+    result_dir.mkdir(mode=0o700, exist_ok=True)
+    if result_dir.is_symlink():
+        raise RuntimeError("SENSEVOICE_STAGING_UNAVAILABLE")
+    runner = subprocess.Popen(
+        [str(python), str(engine)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+    )
+    try:
+        stdout, _ = runner.communicate(
+            json.dumps({
+                "input": str(audio),
+                "output_dir": str(result_dir),
+                "model_dir": str(model),
+            }), timeout=3600,
         )
+    except subprocess.TimeoutExpired:
         try:
-            stdout, _ = runner.communicate(
-                json.dumps({
-                    "input": str(audio),
-                    "output_dir": str(result_dir),
-                    "model_dir": str(model),
-                }), timeout=3600,
-            )
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(runner.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            runner.communicate()
-            raise RuntimeError("SENSEVOICE_TIMEOUT") from None
-        if runner.returncode:
-            raise RuntimeError("SENSEVOICE_FAILED")
+            os.killpg(runner.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        runner.communicate()
+        raise RuntimeError("SENSEVOICE_TIMEOUT") from None
+    if runner.returncode:
         try:
-            response = json.loads(stdout.strip())
-            manifest = json.loads(
-                (result_dir / "transcript.sensevoice.manifest.json").read_text("utf8"))
-        except (OSError, TypeError, ValueError, KeyError):
-            raise RuntimeError("SENSEVOICE_RESULT_INVALID") from None
-        if (not response.get("ok") or response.get("parts", 0) < 1
-                or manifest.get("parts") != response["parts"]
-                or manifest.get("model") != "sensevoice-int8-2024"):
-            raise RuntimeError("SENSEVOICE_RESULT_INVALID")
-        transcript = result_dir / "transcript.sensevoice.txt"
-        if not transcript.is_file() or transcript.is_symlink():
-            raise RuntimeError("SENSEVOICE_RESULT_INVALID")
-        text = transcript.read_text("utf8").strip()
-        if len(text) < 20:
-            raise RuntimeError("SENSEVOICE_EMPTY")
-        # A few uncertain segments may still be useful for the user's
-        # original transcript. Return unmodified recognized content here;
-        # quality flags can be surfaced separately in a subsequent version.
-        return text
+            reason = json.loads(stdout.strip()).get("code", "SENSEVOICE_FAILED")
+        except (ValueError, AttributeError):
+            reason = "SENSEVOICE_FAILED"
+        raise RuntimeError(reason)
+    try:
+        response = json.loads(stdout.strip())
+        manifest = json.loads(
+            (result_dir / "transcript.sensevoice.manifest.json").read_text("utf8"))
+    except (OSError, TypeError, ValueError, KeyError):
+        raise RuntimeError("SENSEVOICE_RESULT_INVALID") from None
+    if (not response.get("ok") or response.get("parts", 0) < 1
+            or manifest.get("parts") != response["parts"]
+            or manifest.get("model") != "sensevoice-int8-2024"):
+        raise RuntimeError("SENSEVOICE_RESULT_INVALID")
+    transcript = result_dir / "transcript.sensevoice.txt"
+    if not transcript.is_file() or transcript.is_symlink():
+        raise RuntimeError("SENSEVOICE_RESULT_INVALID")
+    text = transcript.read_text("utf8").strip()
+    if len(text) < 20:
+        raise RuntimeError("SENSEVOICE_EMPTY")
+    # Preserve actual group/window counts for UI and future diagnostics.
+    metrics = {"chunk_count": int(manifest.get("chunk_count", 0)),
+               "segment_count": int(manifest["parts"]),
+               "duration_seconds": float(manifest.get("duration_seconds", 0))}
+    shutil.rmtree(staging)
+    return text, metrics
 
 
 def default_transcriber(video: Path, model_name: str) -> str:
-    if model_name == "sensevoice":
-        try:
-            return sensevoice_transcriber(video)
-        except Exception:
-            # Explicit opt-in. Do not silently use the slow Whisper fallback
-            # when offline model paths or media decoders are misconfigured.
-            if os.environ.get("LOCAL_ASR_FALLBACK_BASE", "false").strip().lower() not in {
-                "true", "yes", "1",
-            }:
-                raise
-            model_name = "base"
-    import torch
-    import whisper
-    torch.set_num_threads(4)
-    cache = MODEL_CACHE
-    if model_name not in cache:
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-        # The operator must prefetch a permitted model; runtime downloads
-        # during a user-facing job are deliberately not supported.
-        from whisper import _MODELS
-        url = _MODELS.get(model_name)
-        if url is None:
-            raise ValueError("UNKNOWN_WHISPER_MODEL")
-        model_path = Path.home() / ".cache" / "whisper" / (url.split("/")[-1])
-        if not model_path.is_file():
-            raise RuntimeError("WHISPER_MODEL_NOT_CACHED")
-        cache[model_name] = whisper.load_model(
-            model_name, device=device, download_root=str(model_path.parent)
-        )
-    result = cache[model_name].transcribe(
-        str(video), language="zh", task="transcribe", fp16=False, verbose=False
-    )
-    return str(result.get("text") or "").strip()
+    # This project only routes new ASR work to SenseVoice. Any locally
+    # installed Whisper remains untouched and available to other projects.
+    if model_name != "sensevoice":
+        raise ValueError("MODEL_NOT_ALLOWED")
+    return sensevoice_transcriber(video)
 
 
 def process_request(data_dir: Path, payload: dict, transcribe: Callable[[Path, str], str]) -> dict:
@@ -170,11 +194,12 @@ def process_request(data_dir: Path, payload: dict, transcribe: Callable[[Path, s
     if not JOB_ID.fullmatch(job_id):
         raise ValueError("INVALID_JOB_ID")
     video = resolve_video(data_dir / "downloads", str(payload.get("video_filename") or ""))
-    model = str(payload.get("model") or "base")
-    if model not in {"base", "small", "medium", "turbo", "sensevoice"}:
+    model = str(payload.get("model") or "sensevoice")
+    if model != "sensevoice":
         raise ValueError("MODEL_NOT_ALLOWED")
     start = time.monotonic()
-    text = transcribe(video, model)
+    transcribed = transcribe(video, model)
+    text, metrics = transcribed if isinstance(transcribed, tuple) else (transcribed, {})
     if len(text) < 20:
         raise ValueError("TRANSCRIPT_EMPTY")
     output = data_dir / "downloads" / f"{job_id}.transcript.txt"
@@ -186,13 +211,15 @@ def process_request(data_dir: Path, payload: dict, transcribe: Callable[[Path, s
     return {
         "ok": True, "job_id": job_id, "transcript_filename": output.name,
         "characters": len(text), "elapsed_seconds": round(time.monotonic() - start, 1),
+        "chunk_count": metrics.get("chunk_count"),
+        "segment_count": metrics.get("segment_count"),
+        "duration_seconds": metrics.get("duration_seconds"),
     }
 
 
 def run_once(data_dir: Path, transcribe: Callable[[Path, str], str] = default_transcriber) -> bool:
     queue = data_dir / "transcription_queue"
-    queue.mkdir(parents=True, exist_ok=True)
-    os.chmod(queue, 0o700)
+    ensure_private_queue(queue)
     items = sorted(queue.glob("wxv_*.processing.json")) + sorted(queue.glob("wxv_*.request.json"))
     for item in items:
         match = re.fullmatch(r"(wxv_\d{6})\.(?:request|processing)\.json", item.name)
@@ -224,6 +251,8 @@ def run_once(data_dir: Path, transcribe: Callable[[Path, str], str] = default_tr
                 "SENSEVOICE_NOT_CONFIGURED", "SENSEVOICE_ENGINE_MISSING",
                 "SENSEVOICE_AUDIO_EXTRACT_FAILED", "SENSEVOICE_STAGING_UNAVAILABLE",
                 "SENSEVOICE_FAILED", "SENSEVOICE_TIMEOUT",
+                "AUDIO_TOO_LONG_OR_INVALID", "TOO_MANY_PARTS", "ENGINE_FAILED",
+                "SENSEVOICE_SOURCE_CHANGED",
                 "SENSEVOICE_RESULT_INVALID", "SENSEVOICE_EMPTY",
             } else "TRANSCRIPTION_FAILED"
             result = {"ok": False, "job_id": jid, "error_code": code}
@@ -237,14 +266,28 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--model", choices=["base","small","medium","turbo","sensevoice"], default="base")
+    parser.add_argument("--model", choices=["sensevoice"], default="sensevoice")
     args = parser.parse_args()
     data_dir = Path(args.data_dir).expanduser().resolve(strict=True)
     if not (data_dir / "downloads").is_dir():
         raise SystemExit("Invalid WechatVideoDL data directory")
+    # Never announce readiness for a worker missing its offline dependencies
+    # or model. This is particularly important on first-time installations.
+    python = Path(os.environ.get("LOCAL_ASR_SENSEVOICE_PYTHON", ""))
+    model_dir = Path(os.environ.get("LOCAL_ASR_SENSEVOICE_MODEL_DIR", ""))
+    if (not python.is_file() or not os.access(python, os.X_OK) or
+            not model_dir.is_dir() or model_dir.is_symlink() or
+            not (model_dir / "model.int8.onnx").is_file() or
+            not (model_dir / "tokens.txt").is_file()):
+        raise SystemExit("SENSEVOICE_NOT_CONFIGURED")
+    try:
+        subprocess.run([str(python), "-c", "import numpy, sherpa_onnx"],
+                       timeout=30, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit("SENSEVOICE_RUNTIME_UNAVAILABLE") from exc
     queue = data_dir / "transcription_queue"
-    queue.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(queue, 0o700)
+    ensure_private_queue(queue)
     if args.once:
         run_once(data_dir)
         return

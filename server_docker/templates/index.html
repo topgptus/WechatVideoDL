@@ -25,24 +25,42 @@
       </div>
     </div>
 
-    <div class="field-stack">
-      <div class="field-label-row"><label class="field-label" for="preset-select">提示词预设</label><span>选择后仍可自由修改</span></div>
-      <select id="preset-select" class="select-input"><option value="">自定义提示词</option></select>
+    <fieldset class="task-modes" aria-label="任务模式">
+      <legend class="field-label">任务模式</legend>
+      <div class="task-mode-grid" id="task-mode-grid">
+        <label><input type="radio" name="task-mode" value="custom" checked><span>下载 + AI 解析</span></label>
+        <label><input type="radio" name="task-mode" value="video_only"><span>仅下载视频</span></label>
+        <label><input type="radio" name="task-mode" value="narration_only"><span>仅生成旁白</span></label>
+        <label><input type="radio" name="task-mode" value="analysis_only"><span>仅 AI 解析</span></label>
+        <label><input type="radio" name="task-mode" value="full"><span>完整处理</span></label>
+      </div>
+    </fieldset>
+    <div id="analysis-options">
+      <div class="field-stack">
+        <div class="field-label-row"><label class="field-label" for="preset-select">提示词预设</label><span>选择后仍可自由修改</span></div>
+        <select id="preset-select" class="select-input"><option value="">自定义提示词</option></select>
+      </div>
+      <div class="field-stack"><label class="field-label" for="prompt-input">Prompt</label>
+        <textarea id="prompt-input" class="text-area" rows="8" placeholder="例如：总结视频核心内容，并整理成可导入知识库的结构化笔记。"></textarea>
+      </div>
     </div>
-
-    <div class="field-stack">
-      <label class="field-label" for="prompt-input">Prompt</label>
-      <textarea id="prompt-input" class="text-area" rows="8" placeholder="例如：总结视频核心内容，并整理成可导入知识库的结构化笔记。"></textarea>
-    </div>
-
-    <div class="options-row">
-      <label class="compact-field">输出格式
+    <div class="options-row" id="task-output-options">
+      <label class="compact-field" for="output-format">文本输出格式
         <select id="output-format" class="select-input compact">
           <option value="md" selected>Markdown (.md)</option>
           <option value="txt">Plain Text (.txt)</option>
         </select>
       </label>
-      <label class="toggle-line"><input id="download-mp4" type="checkbox" checked><span class="toggle-ui"></span><span>同时下载 MP4</span></label>
+    </div>
+    <div class="task-suboptions" aria-label="任务输出内容">
+      <label class="toggle-line" id="download-option"><input id="download-mp4" type="checkbox" checked><span class="toggle-ui"></span><span>保存 MP4</span></label>
+      <label class="toggle-line" id="analyze-option"><input id="generate-analysis" type="checkbox" checked><span class="toggle-ui"></span><span>生成 AI 解析</span></label>
+      <label class="toggle-line" id="narration-option"><input id="generate-narration" type="checkbox"><span class="toggle-ui"></span><span>AI 整理版旁白</span></label>
+      <div class="transcript-output-group" role="group" aria-label="原始语音逐字稿选项">
+        <label class="toggle-line" id="raw-option"><input id="generate-raw" type="checkbox" aria-controls="timed-option"><span class="toggle-ui"></span><span>原始语音逐字稿（SenseVoice）</span></label>
+        <label class="toggle-line transcript-time-option hidden" id="timed-option"><input id="generate-timed" type="checkbox"><span class="toggle-ui"></span><span>附带时间轴</span></label>
+      </div>
+      <p class="task-output-hint" id="task-output-hint">由 SenseVoice 识别，不做 AI 文案改写。</p>
     </div>
 
     <button id="parse-button" class="primary-button action-button" type="button">
@@ -58,14 +76,25 @@
     <div id="result-progress" class="result-progress hidden" role="status" aria-live="polite">
       <strong id="progress-title">任务已提交</strong>
       <p id="progress-detail">正在等待后台更新…</p>
+      <div class="task-step-summary" aria-live="polite">
+        <strong id="progress-summary">正在读取处理步骤…</strong>
+        <span id="progress-current"></span>
+      </div>
+      <ol id="progress-steps" class="task-step-list" aria-label="任务处理步骤"></ol>
+      <div id="progress-measured" class="task-measured hidden"></div>
+      <div class="task-output-checklist" id="progress-outputs"></div>
       <a href="{{ url_for('history_page') }}">在历史记录中查看</a>
     </div>
     <div id="result-empty" class="result-empty">
       <div class="orbital-mark"><span></span><span></span><span></span></div>
       <h3>结果会出现在这里</h3>
-      <p>后台会完成元宝解析、真实视频地址获取、文本保存与可选 MP4 下载。</p>
+      <p>后台按选择执行视频下载、AI 分析和本地 SenseVoice 语音识别。</p>
     </div>
     <div id="result-content" class="result-content hidden">
+      <details id="result-workflow" class="task-completion-details hidden" open>
+        <summary id="result-workflow-summary">查看处理流程</summary>
+        <ol id="result-workflow-steps" class="task-step-list" aria-label="本任务处理结果"></ol>
+      </details>
       <div class="result-media-head">
         <img id="result-thumbnail" class="result-thumbnail hidden" alt="视频缩略图">
         <div class="result-title-wrap">
@@ -79,10 +108,12 @@
         <div><small>格式</small><strong id="result-format">—</strong></div>
       </div>
       <p id="result-transcription-time" class="transcription-time hidden" title="含本地音轨提取、语音识别和逐字稿保存；不包含元宝分析或视频下载"></p>
+      <p id="result-transcription-coverage" class="transcription-time hidden" aria-live="polite"></p>
+      <p id="result-quality-notice" class="retry-notice hidden" role="status" aria-live="polite"></p>
       <div id="retry-notice" class="retry-notice hidden"></div>
       <div class="download-row" id="download-links"></div>
-      <div class="content-preview">
-        <div class="field-label-row"><span class="field-label">元宝内容</span><button id="copy-content" class="text-button" type="button">复制</button></div>
+      <div class="content-preview" id="result-analysis-preview">
+        <div class="field-label-row"><span class="field-label" id="analysis-source-label">元宝内容</span><button id="copy-content" class="text-button" type="button">复制</button></div>
         <pre id="analysis-content"></pre>
       </div>
       <details class="technical-details"><summary>技术详情</summary><pre id="technical-json"></pre></details>

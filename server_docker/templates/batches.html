@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}批量任务 · WechatVideoDL{% endblock %}
+{% block page %}batches{% endblock %}
+{% block content %}
+<section class="page-intro batch-intro" aria-labelledby="batch-page-title">
+  <div>
+    <div class="eyebrow">BATCH AUTOMATION</div>
+    <h1 id="batch-page-title">批量任务</h1>
+    <p>集中导入视频号链接，依次下载与拆解内容。一次最多 30 条，任务离开页面后仍继续执行。</p>
+  </div>
+  <a class="secondary-button batch-history-link" href="{{ url_for('history_page') }}">查看历史记录 <span aria-hidden="true">↗</span></a>
+</section>
+<div class="batch-page-grid">
+  <section class="panel batch-create-panel" aria-labelledby="batch-create-heading">
+    <div class="panel-heading batch-panel-heading">
+      <div><span class="panel-index">01</span><h2 id="batch-create-heading">创建批次</h2></div>
+      <span class="batch-panel-caption">批量导入</span>
+    </div>
+    <div class="batch-panel-content">
+      <div class="batch-field-group batch-url-group">
+        <div class="field-label-row batch-field-caption">
+          <label class="field-label" for="batch-urls">视频号链接</label>
+          <span id="batch-url-count" class="batch-counter" role="status" aria-live="polite">0 条链接</span>
+        </div>
+        <textarea id="batch-urls" class="text-area batch-url-input" rows="5" spellcheck="false" aria-describedby="batch-url-help" placeholder="每行一个链接，也可直接粘贴微信分享内容&#10;https://weixin.qq.com/sph/..."></textarea>
+        <p id="batch-url-help" class="batch-help">最多 30 条，自动跳过重复链接；每条视频独立创建任务。</p>
+      </div>
+
+      <p class="batch-shared-note" role="note">本批次统一设置：下面的任务模式、提示词和输出选项将应用于<strong>每一条视频</strong>，执行中不能单独修改。</p>
+
+      <fieldset class="task-modes batch-task-modes" aria-label="任务模式">
+        <legend class="field-label">任务模式</legend>
+        <div class="task-mode-grid" id="batch-task-mode-grid">
+          <label><input type="radio" name="batch-task-mode" value="custom" checked><span>下载 + AI 解析</span></label>
+          <label><input type="radio" name="batch-task-mode" value="video_only"><span>仅下载视频</span></label>
+          <label><input type="radio" name="batch-task-mode" value="narration_only"><span>仅生成旁白</span></label>
+          <label><input type="radio" name="batch-task-mode" value="analysis_only"><span>仅 AI 解析</span></label>
+          <label><input type="radio" name="batch-task-mode" value="full"><span>完整处理</span></label>
+        </div>
+      </fieldset>
+
+      <div id="batch-analysis-options" class="batch-analysis-options">
+        <div class="field-stack">
+          <div class="field-label-row"><label class="field-label" for="batch-preset">提示词预设</label><span>选择后仍可自由修改</span></div>
+          <select id="batch-preset" class="select-input"><option value="">自定义提示词</option></select>
+        </div>
+        <div class="field-stack">
+          <label class="field-label" for="batch-prompt">Prompt</label>
+          <textarea id="batch-prompt" class="text-area batch-prompt-input" rows="5" placeholder="例如：总结视频核心内容，并整理成可导入知识库的结构化笔记。"></textarea>
+        </div>
+      </div>
+
+      <div class="options-row" id="batch-format-options">
+        <label class="compact-field" for="batch-format">文本输出格式
+          <select id="batch-format" class="select-input compact">
+            <option value="md" selected>Markdown (.md)</option>
+            <option value="txt">Plain Text (.txt)</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="task-suboptions batch-task-suboptions" aria-label="任务输出内容">
+        <label class="toggle-line"><input id="batch-download" type="checkbox" checked><span class="toggle-ui"></span><span>保存 MP4</span></label>
+        <label class="toggle-line"><input id="batch-analyze" type="checkbox" checked><span class="toggle-ui"></span><span>生成 AI 解析</span></label>
+        <label class="toggle-line"><input id="batch-narration" type="checkbox"><span class="toggle-ui"></span><span>AI 整理版旁白</span></label>
+        <div class="transcript-output-group" role="group" aria-label="原始语音逐字稿选项">
+          <label class="toggle-line"><input id="batch-raw" type="checkbox" aria-controls="batch-timed-wrap"><span class="toggle-ui"></span><span>原始语音逐字稿（SenseVoice）</span></label>
+          <label id="batch-timed-wrap" class="toggle-line transcript-time-option hidden"><input id="batch-timed" type="checkbox"><span class="toggle-ui"></span><span>附带时间轴</span></label>
+        </div>
+        <p class="task-output-hint" id="batch-task-output-hint">由 SenseVoice 识别，不做 AI 文案改写。</p>
+      </div>
+    </div>
+    <div class="batch-create-footer">
+      <button id="batch-submit" class="primary-button action-button" type="button"><span>创建批量任务</span><span aria-hidden="true">→</span></button>
+      <p id="batch-create-feedback" class="batch-feedback" role="status" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <section class="panel batch-monitor-panel" data-empty="true" aria-labelledby="batch-monitor-heading">
+    <div class="panel-heading batch-panel-heading">
+      <div><span class="panel-index">02</span><h2 id="batch-monitor-heading">执行队列</h2></div>
+      <button type="button" id="batch-refresh" class="text-button batch-refresh-button">刷新</button>
+    </div>
+    <div id="batch-empty-state" class="batch-empty-state" aria-live="polite">
+      <div class="batch-empty-symbol" aria-hidden="true"><span>▤</span></div>
+      <h3>还没有批量任务</h3>
+      <p>从左侧粘贴视频号链接并创建批次。任务进度、执行状态和下载成果将在这里集中显示。</p>
+      <span class="batch-empty-tip">批量任务按顺序处理，不会同时占用多个元宝会话。</span>
+    </div>
+    <div class="batch-monitor-content" id="batch-monitor-content">
+      <div class="batch-field-group">
+        <label class="field-label" for="batch-choose">当前批次</label>
+        <select id="batch-choose" class="select-input"><option value="">暂无批次</option></select>
+      </div>
+      <div id="batch-summary" class="batch-summary" aria-live="polite">正在加载任务队列…</div>
+      <div class="batch-actions" role="group" aria-label="批次控制">
+        <button id="batch-pause" class="secondary-button" type="button" disabled>暂停待执行</button>
+        <button id="batch-resume" class="secondary-button" type="button" disabled>继续执行</button>
+        <button id="batch-retry" class="secondary-button" type="button" disabled>重试失败</button>
+        <button id="batch-cancel" class="danger-button" type="button" disabled>取消待执行</button>
+      </div>
+      <p class="batch-help batch-control-note">暂停和取消只影响尚未开始的任务，正在处理的视频不会中断。</p>
+      <a id="batch-export" class="primary-button batch-export-link hidden" href="#">下载本批次全部成果 ZIP <span aria-hidden="true">↓</span></a>
+      <p id="batch-export-help" class="batch-help hidden">按视频分别归档 MP4、AI 解析、旁白、逐字稿及封面；未完成任务仅包含当前已生成的文件。</p>
+      <p id="batch-action-feedback" class="batch-feedback" role="status" aria-live="polite"></p>
+      <div class="batch-list-heading"><h3>任务明细</h3><span id="batch-list-total">—</span></div>
+      <ol id="batch-job-list" class="batch-job-list" aria-label="批次内任务执行进度"><li class="batch-empty">没有任务</li></ol>
+    </div>
+  </section>
+</div>
+{% endblock %}

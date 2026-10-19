@@ -6,10 +6,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class FrontendContractTests(unittest.TestCase):
     def test_frontend_has_three_theme_modes_and_persists_preference(self):
-        base = (ROOT / "templates" / "base.html").read_text("utf-8")
+        settings = (ROOT / "templates" / "settings.html").read_text("utf-8")
         js = (ROOT / "static" / "app.js").read_text("utf-8")
         for theme in ["light", "dark", "system"]:
-            self.assertIn(f'value="{theme}"', base)
+            self.assertIn(f'value="{theme}"', settings)
         self.assertIn("localStorage", js)
         self.assertIn("wvd-theme", js)
 
@@ -81,7 +81,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertNotIn('window.location.href = "weixin://"', js)
         self.assertIn('target = "_blank"', js)
         self.assertIn('rel = "noopener noreferrer"', js)
-        self.assertIn("job.title", js[js.index("const visible = jobs.filter"):])
+        self.assertIn("job.title", js[js.index("function historyCard(job, reload, selection = null)"):])
         self.assertIn("按标题", history)
 
     def test_async_polling_and_refresh_recovery_contract(self):

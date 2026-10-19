@@ -1,5 +1,22 @@
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Yuanbao uses localized ARIA labels; never assume an English-only UI.
+async function openFreshChat(page) {
+  const selectors = ['[aria-label="新建对话"]', '[aria-label="New Chat"]'];
+  for (let attempt = 0; attempt < 12; attempt++) {
+    for (const selector of selectors) {
+      for (const candidate of await page.$$(selector)) {
+        const box = await candidate.boundingBox();
+        if (!box || box.width <= 0 || box.height <= 0) continue;
+        await candidate.click();
+        return;
+      }
+    }
+    await sleep(350);
+  }
+  throw new Error("YUANBAO_NEW_CHAT_UNAVAILABLE");
+}
+
 function findVideoUrl(value, depth = 0) {
   if (depth > 12 || value == null) return "";
   if (typeof value === "string") {
@@ -106,9 +123,7 @@ module.exports = async ({ page, context }) => {
 
   // Yuanbao restores a previously opened chat on the root URL. Explicitly
   // open a fresh conversation to avoid silently posting into old history.
-  const newChat = await page.$('[aria-label="New Chat"]');
-  if (!newChat) throw new Error("YUANBAO_NEW_CHAT_UNAVAILABLE");
-  await page.click('[aria-label="New Chat"]');
+  await openFreshChat(page);
   await sleep(900);
 
   const editor = '[contenteditable="true"]';

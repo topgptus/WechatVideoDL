@@ -19,8 +19,9 @@ import wave
 
 WINDOW_S = 20
 HOP_S = 19
-MAX_AUDIO_S = 7200
-MAX_PARTS = 400
+MAX_AUDIO_S = 28800  # 8h; handled as 30-minute checkpoint groups
+MAX_PARTS = 1600
+CHUNK_S = 1800
 
 
 def digest(path: Path) -> str:
@@ -154,6 +155,7 @@ def main() -> dict:
     else:
         folder.mkdir(mode=0o700)
     starts = list(range(0, math.ceil(seconds), HOP_S))
+    chunk_count = math.ceil(seconds / CHUNK_S)
     if len(starts) > MAX_PARTS:
         fail("TOO_MANY_PARTS")
     import numpy as np
@@ -165,7 +167,12 @@ def main() -> dict:
     parts = []
     warnings = []
     for i, offset in enumerate(starts, 1):
-        checkpoint = folder / f"part_{i:03}.json"
+        chunk_index = offset // CHUNK_S + 1
+        chunk_folder = folder / f"chunk_{chunk_index:03}"
+        chunk_folder.mkdir(mode=0o700, exist_ok=True)
+        if chunk_folder.is_symlink():
+            fail("UNSAFE_CHECKPOINT")
+        checkpoint = chunk_folder / f"part_{i:04}.json"
         expected = {"index": i, "offset": offset, "source_sha256": sha,
                     "model_sha256": mhash, "window_seconds": WINDOW_S,
                     "hop_seconds": HOP_S}
@@ -216,6 +223,14 @@ def main() -> dict:
         parts.append(rec)
         if rec.get("warnings"):
             warnings.append({"part": i, "codes": rec["warnings"]})
+        # A completed group stays private and resumable independently of later groups.
+        next_offset = starts[i] if i < len(starts) else None
+        if next_offset is None or next_offset // CHUNK_S + 1 != chunk_index:
+            safe_write_json(chunk_folder / "manifest.json", {
+                "chunk": chunk_index, "parts": len([x for x in parts if x["offset"] // CHUNK_S + 1 == chunk_index]),
+                "last_window": i, "end_s": round(min(seconds, offset + rec["duration_s"]), 3),
+                "source_sha256": sha, "model_sha256": mhash,
+            })
 
     raw = "\n".join(
         f"[{fmt(x['offset'])} - {fmt(x['offset']+x['duration_s'])}] {x['text']}"
@@ -247,7 +262,7 @@ def main() -> dict:
     summary = {
         "format": 1, "model": "sensevoice-int8-2024",
         "source_sha256": sha, "model_sha256": mhash,
-        "duration_seconds": round(seconds, 3),
+        "duration_seconds": round(seconds, 3), "chunk_count": chunk_count,
         "parts": len(parts), "window_seconds": WINDOW_S, "hop_seconds": HOP_S,
         "recognized_chars_raw": sum(len(x["text"]) for x in parts),
         "recognized_chars_merged": sum(len(x.split("] ", 1)[-1]) for x in merged),
@@ -260,7 +275,8 @@ def main() -> dict:
     safe_write_json(manifest, summary)
     return {"ok": True, "skill_action": "transcribe_sensevoice",
             "engine": "sherpa-onnx SenseVoice INT8",
-            "parts": len(parts), "duration_seconds": round(seconds, 3),
+            "parts": len(parts), "chunk_count": chunk_count,
+            "duration_seconds": round(seconds, 3),
             "characters": summary["recognized_chars_merged"],
             "warning_count": len(warnings), "quality_status": summary["quality_status"],
             "transcript_file": str(transcript), "raw_file": str(raw_output),

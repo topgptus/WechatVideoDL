@@ -69,3 +69,6 @@ __pycache__/
 # Superpowers execution workspaces
 .worktrees/
 .superpowers/
+
+# Downloaded third-party models (never push ~230MB+ binaries)
+server_docker/models/

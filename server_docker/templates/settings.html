@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}设置 · WechatVideoDL{% endblock %}
+{% block page %}settings{% endblock %}
+{% block content %}
+<section class="page-intro settings-intro">
+  <div><span class="eyebrow">SETTINGS</span><h1>设置</h1>
+    <p>在这里管理登录安全、用户权限和元宝连接。日常视频解析仍在工作台完成。</p>
+  </div>
+</section>
+<div class="settings-shell" data-initial-section="{{ active_section }}">
+  <nav class="settings-sidebar panel" aria-label="设置分类">
+    <span class="settings-nav-caption">个人设置</span>
+    <a href="#account" data-settings-target="account" class="settings-nav-link {{ 'is-active' if active_section == 'account' else '' }}" {{ 'aria-current="location"' if active_section == 'account' else '' }}>账号与安全</a>
+    <a href="#appearance" data-settings-target="appearance" class="settings-nav-link {{ 'is-active' if active_section == 'appearance' else '' }}" {{ 'aria-current="location"' if active_section == 'appearance' else '' }}>外观</a>
+    {% if current_user().role == 'admin' %}
+    <span class="settings-nav-caption">管理工具</span>
+    <a href="#users" data-settings-target="users" class="settings-nav-link {{ 'is-active' if active_section == 'users' else '' }}" {{ 'aria-current="location"' if active_section == 'users' else '' }}>用户管理</a>
+    <a href="#yuanbao" data-settings-target="yuanbao" class="settings-nav-link {{ 'is-active' if active_section == 'yuanbao' else '' }}" {{ 'aria-current="location"' if active_section == 'yuanbao' else '' }}>元宝连接</a>
+    <a href="#sensevoice" data-settings-target="sensevoice" class="settings-nav-link {{ 'is-active' if active_section == 'sensevoice' else '' }}" {{ 'aria-current="location"' if active_section == 'sensevoice' else '' }}>语音识别</a>
+    {% endif %}
+  </nav>
+  <div class="settings-content">
+    <section id="account" class="settings-pane {{ 'is-active' if active_section == 'account' else '' }}" data-settings-panel="account" aria-labelledby="settings-account-title">
+      <div class="settings-pane-heading"><h2 id="settings-account-title">账号与安全</h2><p>查看身份信息并更新登录密码。</p></div>
+      <div class="panel account-panel">
+  <div class="panel-heading"><div><h2>账号信息</h2></div></div>
+  <p>用户名：<strong>{{ current_user().username }}</strong>
+    <span class="status-badge completed">{{ '超级管理员' if current_user().is_superadmin else ('管理员' if current_user().role == 'admin' else '普通用户') }}</span></p>
+  {% if account_error %}<div class="alert error" role="alert">{{ account_error }}</div>{% endif %}
+  {% if account_message %}<div class="alert" role="status">{{ account_message }}</div>{% endif %}
+  <form method="post" action="{{ url_for('account_password') }}" class="account-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>当前密码<input name="current_password" type="password" required autocomplete="current-password"></label>
+    <label>新密码（至少 8 个字符）<input name="new_password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
+    <label>再次输入新密码<input name="confirm_password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
+    <button class="primary-button full" type="submit">修改密码并重新登录</button>
+  </form>
+</div>
+    </section>
+    <section id="appearance" class="settings-pane {{ 'is-active' if active_section == 'appearance' else '' }}" data-settings-panel="appearance" aria-labelledby="settings-appearance-title">
+      <div class="settings-pane-heading"><h2 id="settings-appearance-title">外观</h2><p>根据设备环境或个人偏好选择界面主题。</p></div>
+      <div class="panel settings-card">
+        <label class="settings-field" for="theme-select"><span>界面主题</span>
+          <select class="select-input" id="theme-select" aria-label="外观主题">
+            <option value="system">跟随系统</option><option value="light">明亮</option><option value="dark">暗色</option>
+          </select>
+        </label>
+        <p class="settings-help">建议使用「跟随系统」，明亮和深色模式都会自动适配。</p>
+      </div>
+    </section>
+    {% if current_user().role == 'admin' %}
+    <section id="users" class="settings-pane {{ 'is-active' if active_section == 'users' else '' }}" data-settings-panel="users" aria-labelledby="settings-users-title">
+      <div class="settings-pane-heading"><h2 id="settings-users-title">用户管理</h2><p>创建账号、设置角色和管理访问权限。超级管理员保护机制保持不变。</p></div>
+      {% if users_error %}<div class="alert error" role="alert">{{ users_error }}</div>{% endif %}
+{% if users_message %}<div class="alert success" role="status">{{ users_message }}</div>{% endif %}
+<div class="panel account-panel">
+  <div class="panel-heading"><div><h2>创建新用户</h2></div></div>
+  <form method="post" action="{{ url_for('admin_create_user') }}" class="account-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>用户名<input name="username" required maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off" placeholder="英文字母、数字、点、下划线或连字符"></label>
+    <label>初始密码（至少 8 个字符）<input name="password" required type="password" minlength="8" maxlength="256" autocomplete="new-password"></label>
+    <label>角色<select name="role" class="select-input"><option value="member">普通用户（仅自己的历史与文件）</option><option value="admin">管理员（管理全部历史和用户）</option></select></label>
+    <button class="primary-button full" type="submit">创建用户</button>
+  </form>
+</div>
+<section class="user-directory">
+  <h2>现有用户</h2>
+  {% for user in users %}
+  <article class="panel user-card">
+    <div class="user-heading"><strong>{{ user.username }}</strong>
+      <span class="status-badge {{ 'completed' if user.active else 'failed' }}">{{ '已启用' if user.active else '已停用' }}</span>
+      <small>{{ '超级管理员 · 受保护' if user.is_superadmin else ('管理员' if user.role == 'admin' else '普通用户') }}</small>
+    </div>
+    <div class="user-actions">
+      {% if not user.is_superadmin %}
+      <form method="post" action="{{ url_for('admin_reset_password', uid=user.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>设置新密码<input name="password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
+        <label>确认新密码<input name="confirm_password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
+        <button class="secondary-button" type="submit">重置密码</button>
+      </form>
+      {% endif %}
+      {% if user.is_superadmin %}
+      <p class="user-self-note user-protected-note" role="note">此账号为系统唯一超级管理员。其他管理员无法重置密码、调整权限或停用；该超级管理员本人可在「账号与安全」验证当前密码后自行修改密码。</p>
+      {% elif user.id != current_user().id %}
+      <form method="post" action="{{ url_for('admin_change_role', uid=user.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>权限<select name="role" class="select-input"><option value="member" {% if user.role == 'member' %}selected{% endif %}>普通用户</option><option value="admin" {% if user.role == 'admin' %}selected{% endif %}>管理员</option></select></label>
+        <button class="secondary-button" type="submit">更新权限</button>
+      </form>
+      <form method="post" action="{{ url_for('admin_set_active', uid=user.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="active" value="{{ '0' if user.active else '1' }}">
+        <button class="danger-button" type="submit">{{ '停用账号' if user.active else '启用账号' }}</button>
+      </form>
+      {% else %}
+      <p class="user-self-note">当前登录账号。为防止失去管理权限，不能在此停用或降级自己。</p>
+      {% endif %}
+    </div>
+  </article>
+  {% endfor %}
+</section>
+    </section>
+    <section id="yuanbao" class="settings-pane {{ 'is-active' if active_section == 'yuanbao' else '' }}" data-settings-panel="yuanbao" aria-labelledby="settings-yuanbao-title">
+      <div class="settings-pane-heading"><h2 id="settings-yuanbao-title">元宝连接</h2><p>管理员统一维护元宝登录配置，所有用户共享使用。上传的凭据只保存在服务器私有目录，页面不会显示或导出内容。</p></div>
+      {% if yuanbao_error %}<div class="alert error" role="alert">{{ yuanbao_error }}</div>{% endif %}
+      {% if yuanbao_message %}<div class="alert success" role="status">{{ yuanbao_message }}</div>{% endif %}
+      <div class="yuanbao-credential-grid">
+        <div class="panel settings-card credential-card">
+          <div class="credential-head"><strong>Cookie 文件</strong><span class="status-badge {{ 'completed' if yuanbao_status.cookies=='ready' else 'failed' }}">{{ '已配置' if yuanbao_status.cookies=='ready' else ('需更新' if yuanbao_status.cookies=='invalid' else '未配置') }}</span></div>
+          <p class="settings-help">导入浏览器导出的 Netscape cookies.txt；最多 512 KB。只有元宝可用项才会被用于浏览器任务。</p>
+          {% if yuanbao_status.cookies=='ready' %}<p class="credential-meta">已识别 {{ yuanbao_status.cookie_count }} 条可用 Cookie · 不代表登录一定有效</p>{% endif %}
+          <form action="{{ url_for('admin_yuanbao_import', kind='cookies') }}" method="post" enctype="multipart/form-data" class="credential-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label for="yuanbao-cookie-file">选择 Cookie 文件</label>
+            <input type="file" name="credential_file" id="yuanbao-cookie-file" accept=".txt,text/plain" required>
+            <button class="secondary-button" type="submit">导入／更新 Cookie</button>
+          </form>
+        </div>
+        <div class="panel settings-card credential-card">
+          <div class="credential-head"><strong>Session 状态</strong><span class="status-badge {{ 'completed' if yuanbao_status.session=='ready' else 'failed' }}">{{ '已配置' if yuanbao_status.session=='ready' else ('需更新' if yuanbao_status.session=='invalid' else '未配置') }}</span></div>
+          <p class="settings-help">导入兼容项目格式的 session JSON（如 localStorage、sessionStorage、cookie、ua）；最多 1 MB。缺少 Session 不影响导入 Cookie。</p>
+          <form action="{{ url_for('admin_yuanbao_import', kind='session') }}" method="post" enctype="multipart/form-data" class="credential-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label for="yuanbao-session-file">选择 Session 文件</label>
+            <input type="file" name="credential_file" id="yuanbao-session-file" accept=".json,application/json" required>
+            <button class="secondary-button" type="submit">导入／更新 Session</button>
+          </form>
+        </div>
+      </div>
+      <p class="settings-help credential-scope-note">所有账号共用同一套元宝登录状态；普通用户不能查看或更新上述文件。替换只影响后续读取凭据的任务，不会更改历史记录。</p>
+      <div class="panel settings-card settings-diagnostic-card">
+        <div class="settings-action-row"><div><strong>连接诊断</strong><p class="settings-help">只读检查 · 需要约数秒</p></div>
+        <button id="yuanbao-diagnostic-button" class="secondary-button" type="button">检查元宝连接</button></div>
+        <div id="yuanbao-diagnostic-result" role="status" aria-live="polite" aria-atomic="true" class="settings-diagnostic-results">尚未检查。点击按钮获取最新状态。</div>
+      </div>
+    </section>
+    <section id="sensevoice" class="settings-pane {{ 'is-active' if active_section == 'sensevoice' else '' }}" data-settings-panel="sensevoice" aria-labelledby="sensevoice-title">
+      <div class="settings-pane-heading"><h2 id="sensevoice-title">SenseVoice 语音识别</h2><p>离线处理视频语音。安装服务只需管理员在部署服务器执行一次，所有用户共用转写队列。</p></div>
+      <div class="panel settings-card">
+        <div class="credential-head"><strong>本地转写服务</strong><span id="sensevoice-state" class="status-badge {{ 'completed' if sensevoice_status.ready else 'failed' }}">{{ '就绪' if sensevoice_status.ready else ('尚未启用' if not sensevoice_status.enabled else '未就绪') }}</span></div>
+        <p id="sensevoice-message" class="settings-help" role="status" aria-live="polite">{{ sensevoice_status.message }}</p>
+        <div class="settings-action-row"><p class="settings-help">引擎：SenseVoice INT8 · 数据在部署设备本地处理 · 不使用云端 ASR</p><button type="button" id="sensevoice-check-button" class="secondary-button">刷新服务状态</button></div>
+      </div>
+      <div class="panel settings-card">
+        <strong>Linux / Docker 安装</strong>
+        <p class="settings-help">使用可选 worker 容器：先在部署服务器上进入 <code>server_docker</code>，再执行以下命令。安装程序会下载官方模型、单独构建 worker 并校验健康状态；确认后才启用主程序。</p>
+        <pre class="settings-command"><code>./scripts/setup_sensevoice_docker.sh --enable-app</code></pre>
+        <p class="settings-help">不想立即重启应用？省略 <code>--enable-app</code>，先只安装并检查 worker。安装时需要网络、约 1GB 以上的空余磁盘和额外 CPU/内存。</p>
+        <strong>macOS 已有 worker</strong>
+        <p class="settings-help">继续使用现有 launchd worker，不需要重复安装；请勿同时开启 Docker worker 与 macOS worker，否则会争抢同一队列。按现有部署说明配置模型后再启用主程序。</p>
+        <p class="settings-help">出于安全考虑，网页无权限运行 Docker、下载模型或安装系统软件。具体说明见项目文档 <code>docs/SENSEVOICE-SETUP.md</code>。</p>
+      </div>
+    </section>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

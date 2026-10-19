@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create a private launchd agent for the Mac-host transcription worker.
 
-Only intended for macOS installations with a cached OpenAI Whisper model.
+Only intended for a macOS SenseVoice installation; does not modify system Whisper.
 This helper does not manage Docker, Cloudflare, NPM, or unrelated agents.
 """
 from __future__ import annotations
@@ -18,12 +18,12 @@ LABEL = "org.wechatvideodl.local-transcriber"
 
 def make_plist(
     python: Path, worker: Path, data_dir: Path, *,
-    model: str = "base",
+    model: str = "sensevoice",
     sensevoice_python: Path | None = None,
     sensevoice_model_dir: Path | None = None,
     fallback_base: bool = False,
 ) -> dict:
-    if model not in {"base", "sensevoice", "small", "medium", "turbo"}:
+    if model != "sensevoice":
         raise ValueError("INVALID_ASR_MODEL")
     if model == "sensevoice":
         if sensevoice_python is None or sensevoice_model_dir is None:
@@ -41,7 +41,7 @@ def make_plist(
         environment.update({
             "LOCAL_ASR_SENSEVOICE_PYTHON": str(sensevoice_python),
             "LOCAL_ASR_SENSEVOICE_MODEL_DIR": str(sensevoice_model_dir),
-            "LOCAL_ASR_FALLBACK_BASE": "true" if fallback_base else "false",
+            "LOCAL_ASR_FALLBACK_BASE": "false",
         })
     queue = data_dir / "transcription_queue"
     return {
@@ -53,7 +53,7 @@ def make_plist(
         "KeepAlive": True,
         "ThrottleInterval": 20,
         # launchd does not inherit an interactive Homebrew shell PATH.
-        # Whisper invokes FFmpeg as an external command during audio decoding.
+        # SenseVoice invokes FFmpeg for private local audio decoding.
         "EnvironmentVariables": environment,
         "StandardOutPath": str(queue / "worker.stdout.log"),
         "StandardErrorPath": str(queue / "worker.stderr.log"),
@@ -63,22 +63,22 @@ def make_plist(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True)
-    parser.add_argument("--python", required=True, help="Python interpreter where whisper and torch are installed")
-    parser.add_argument("--model", choices=["base", "small", "medium", "turbo", "sensevoice"], default="base")
+    parser.add_argument("--python", required=True, help="Python interpreter for the dedicated worker")
+    parser.add_argument("--model", choices=["sensevoice"], default="sensevoice")
     parser.add_argument("--sensevoice-python", help="Isolated Python with sherpa-onnx and numpy")
     parser.add_argument("--sensevoice-model-dir", help="Offline SenseVoice model/tokens directory")
     parser.add_argument("--fallback-base", action="store_true",
-                        help="Allow Whisper base retry if SenseVoice fails")
+                        help="Legacy compatibility only; Whisper fallback is disabled")
     parser.add_argument("--install", action="store_true")
     parser.add_argument("--uninstall", action="store_true")
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("launchd setup is only supported on macOS")
     # Preserve the venv interpreter symlink: resolving it can remove the
-    # virtual-environment sys.path that contains whisper and torch.
+    # virtual-environment imports required by the isolated worker.
     python = Path(args.python).expanduser().absolute()
     if not python.is_file():
-        raise SystemExit("Whisper Python executable does not exist")
+        raise SystemExit("Worker Python executable does not exist")
     worker = Path(__file__).with_name("host_transcription_worker.py").resolve(strict=True)
     data = Path(args.data_dir).expanduser().resolve(strict=True)
     if not (data/"downloads").is_dir():

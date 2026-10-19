@@ -25,9 +25,9 @@ def _atomic_json(path: Path, obj: dict) -> None:
 
 def transcribe_with_host(
     job_id: str, video: Path, data_dir: Path, *, timeout_seconds: int = 3600,
-    poll_seconds: float = 2, model: str = "base",
-    include_elapsed_ms: bool = False,
-) -> tuple[str, str] | tuple[str, str, int | None]:
+    poll_seconds: float = 2, model: str = "sensevoice",
+    include_elapsed_ms: bool = False, include_metrics: bool = False,
+) -> tuple:
     if not re.fullmatch(r"wxv_\d{6}", job_id):
         raise TranscriptionError("INVALID_JOB_ID")
     data_dir = Path(data_dir).resolve()
@@ -60,6 +60,9 @@ def transcribe_with_host(
                 raise TranscriptionError("LOCAL_WORKER_INVALID_RESULT")
             if not data.get("ok"):
                 raise TranscriptionError(str(data.get("error_code") or "TRANSCRIPTION_FAILED"))
+            metrics = {"transcription_chunk_count": data.get("chunk_count"),
+                       "transcription_segment_count": data.get("segment_count"),
+                       "transcription_duration_seconds": data.get("duration_seconds")}
             text_file = str(data.get("transcript_filename") or "")
             if text_file != f"{job_id}.transcript.txt":
                 raise TranscriptionError("LOCAL_WORKER_INVALID_RESULT")
@@ -80,7 +83,8 @@ def transcribe_with_host(
                     elapsed_ms = round(elapsed_seconds * 1000)
                 else:
                     elapsed_ms = None
-                return text_file, text, elapsed_ms
-            return text_file, text
+                return ((text_file, text, elapsed_ms, metrics) if include_metrics
+                        else (text_file, text, elapsed_ms))
+            return (text_file, text, metrics) if include_metrics else (text_file, text)
         time.sleep(max(0.2, poll_seconds))
     raise TranscriptionError("LOCAL_TRANSCRIPTION_TIMEOUT")
