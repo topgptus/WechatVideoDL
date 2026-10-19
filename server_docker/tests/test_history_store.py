@@ -51,6 +51,16 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(row["output_format"], "md")
         self.assertFalse(row["download_requested"])
 
+    def test_transcription_elapsed_ms_is_optional_and_persistent(self):
+        self.store.create_job(
+            id="wxv_000122", input_url="https://weixin.qq.com/sph/demo",
+            prompt=None, preset_id=None, preset_name=None, output_format="md",
+            download_requested=False, max_attempts=3,
+        )
+        self.assertIsNone(self.store.get_job("wxv_000122")["transcription_elapsed_ms"])
+        self.store.update_job("wxv_000122", transcription_elapsed_ms=34500)
+        self.assertEqual(HistoryStore(self.db).get_job("wxv_000122")["transcription_elapsed_ms"], 34500)
+
     def test_stale_running_jobs_are_marked_failed_on_startup(self):
         self.store.create_job(
             id="wxv_000003",
@@ -126,10 +136,12 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertIsNone(row["cover_url"])
         self.assertIsNone(row["thumbnail_filename"])
         self.assertIsNone(row["bundle_filename"])
+        self.assertIsNone(row["transcription_elapsed_ms"])
         conn = sqlite3.connect(legacy)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
         conn.close()
-        self.assertTrue({"video_title", "cover_url", "thumbnail_filename", "bundle_filename"}.issubset(cols))
+        self.assertTrue({"video_title", "cover_url", "thumbnail_filename", "bundle_filename",
+                         "transcription_elapsed_ms"}.issubset(cols))
 
 
 if __name__ == "__main__":

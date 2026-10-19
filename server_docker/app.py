@@ -20,12 +20,16 @@ from werkzeug.exceptions import BadRequest
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 try:
+    from .content_quality import refusal_reason
+    from .transcription_queue import transcribe_with_host, TranscriptionError
     from .bundle_service import ensure_bundle
     from .history_store import HistoryStore
     from .job_files import safe_owned_path
     from .job_runner import run_parse_job
     from .presets import PRESETS, get_preset
 except ImportError:  # Docker runs modules from /app.
+    from content_quality import refusal_reason
+    from transcription_queue import transcribe_with_host, TranscriptionError
     from bundle_service import ensure_bundle
     from history_store import HistoryStore
     from job_files import safe_owned_path
@@ -38,6 +42,12 @@ DOWNLOAD_DIR = Path(os.environ.get("DOWNLOAD_DIR", DATA_DIR / "downloads")).reso
 COOKIE_FILE = Path(os.environ.get("YUANBAO_COOKIE_FILE", DATA_DIR / "yuanbao.tencent.com_cookies.txt")).resolve()
 SESSION_FILE = Path(os.environ.get("YUANBAO_SESSION_FILE", DATA_DIR / "yuanbao_session.json")).resolve()
 FUNCTION_FILE = Path(os.environ.get("BROWSERLESS_FUNCTION_FILE", APP_DIR / "browserless_function.js")).resolve()
+TEXT_FUNCTION_FILE = APP_DIR / "browserless_text_function.js"
+LOCAL_TRANSCRIPTION_ENABLED = os.environ.get("LOCAL_TRANSCRIPTION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+LOCAL_TRANSCRIPTION_TIMEOUT = int(os.environ.get("LOCAL_TRANSCRIPTION_TIMEOUT", "4500"))
+LOCAL_TRANSCRIPTION_MODEL = os.environ.get("LOCAL_TRANSCRIPTION_MODEL", "base").strip().lower()
+if LOCAL_TRANSCRIPTION_MODEL not in {"base", "small", "medium", "turbo", "sensevoice"}:
+    LOCAL_TRANSCRIPTION_MODEL = "base"
 SEQUENCE_FILE = DATA_DIR / "sequence.txt"
 
 BROWSERLESS_URL = os.environ.get("BROWSERLESS_URL", "http://browserless:3000").rstrip("/")
@@ -246,6 +256,79 @@ def analyze_with_yuanbao(input_url: str, prompt: str | None) -> dict[str, Any]:
     }
 
 
+def analyze_transcript_with_yuanbao(transcript: str, prompt: str | None) -> str:
+    """Hand local speech text back to Yuanbao, preserving the user's prompt."""
+    if not TEXT_FUNCTION_FILE.is_file():
+        raise AppError("TEXT_FUNCTION_MISSING", "纯文本分析功能尚未部署", 503)
+    chunks = [transcript[i:i+5000] for i in range(0, len(transcript), 5000)]
+    if not chunks or len(chunks) > 10:
+        raise AppError("TRANSCRIPT_TOO_LONG", "转写文字过长，需要人工拆分后分析", 413)
+    script = TEXT_FUNCTION_FILE.read_text("utf-8")
+    context = {"cookies": load_cookies(), "session": load_session_state()}
+    def ask(text: str, instruction: str) -> str:
+        response = browserless_function(script, {
+            **context, "transcript": text, "prompt": instruction,
+        }, timeout=BROWSER_TIMEOUT)
+        answer = str(response.get("analysis") or "").strip()
+        if len(answer) < 70 or refusal_reason(answer):
+            raise AppError("TEXT_AI_NO_ANSWER", "元宝没有返回有效的转写分析", 502)
+        return answer
+    goal = prompt or "根据提供的口播文本，整理完整视频内容、结构、核心观点和重要原句。"
+    if len(chunks) == 1:
+        return ask(chunks[0], goal)
+    answers = []
+    for i, chunk in enumerate(chunks, 1):
+        instruction = (f"{goal}\\n这是整段口播的第 {i}/{len(chunks)} 段。请保留关键原话、论据和逻辑，不要编造信息。")
+        answers.append(ask(chunk, instruction))
+    combined = "\\n\\n".join(
+        f"【第 {i}/{len(answers)} 段内容分析】\\n{text}"
+        for i, text in enumerate(answers, 1)
+    )
+    return ask(combined, goal + "\\n请综合各段结果，生成完整连贯的最终内容，避免遗漏。")
+
+
+def _cached_video(input_url: str) -> Path | None:
+    for row in get_history_store().list_jobs(limit=500):
+        if row.get("input_url") != input_url or not row.get("video_filename"):
+            continue
+        path = safe_owned_path(DOWNLOAD_DIR, row["video_filename"], {"mp4"})
+        if path is not None and path.is_file():
+            return path
+    return None
+
+
+def _cached_failed_analysis(input_url: str) -> dict[str, Any] | None:
+    for row in get_history_store().list_jobs(limit=500):
+        if row.get("input_url") != input_url or not refusal_reason(row.get("yuanbao_content")):
+            continue
+        media = safe_owned_path(DOWNLOAD_DIR, row.get("video_filename"), {"mp4"})
+        if not media or not media.is_file() or not row.get("preview_url"):
+            continue
+        return {
+            "content": row.get("yuanbao_content") or "",
+            "previewUrl": row["preview_url"],
+            "directUrl": row.get("source_direct_url") or "",
+            "card": {
+                "title": row.get("video_title") or "",
+                "coverUrl": row.get("cover_url") or "",
+            },
+        }
+    return None
+
+
+def _local_transcribe(job_id: str, video: Path) -> tuple[str, str, int | None]:
+    try:
+        return transcribe_with_host(
+            job_id, video, DATA_DIR, timeout_seconds=LOCAL_TRANSCRIPTION_TIMEOUT,
+            model=LOCAL_TRANSCRIPTION_MODEL,
+            include_elapsed_ms=True,
+        )
+    except TranscriptionError as exc:
+        raise AppError(
+            exc.code, "本地语音转写暂不可用，已保留现有处理结果", 503,
+        ) from None
+
+
 def next_id() -> str:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -395,6 +478,13 @@ def get_history_store() -> HistoryStore:
 
 def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
     video_title = str(job.get("video_title") or "").strip() or str(job.get("id") or "")
+    raw_status = job.get("status")
+    analysis_status = job.get("analysis_status")
+    if analysis_status is None and raw_status == "completed":
+        analysis_status = "unavailable" if refusal_reason(job.get("yuanbao_content")) else "completed"
+    public_status = raw_status
+    if raw_status == "completed" and analysis_status == "unavailable":
+        public_status = "partial" if job.get("video_filename") or job.get("transcript_filename") else "failed"
     result = {
         "id": job["id"],
         "title": video_title,
@@ -410,8 +500,11 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
         # Legacy SQLite allows only running/completed/failed. A pending
         # running record with zero attempts is represented as queued to clients.
-        "status": ("queued" if job.get("status") == "running"
-                   and not job.get("attempts_used") else job.get("status")),
+        "status": ("queued" if raw_status == "running"
+                   and not job.get("attempts_used") else public_status),
+        "stage": job.get("stage"),
+        "analysis_status": analysis_status,
+        "analysis_source": job.get("analysis_source"),
         "attempts_used": job.get("attempts_used", 0),
         "max_attempts": job.get("max_attempts", MAX_PARSE_ATTEMPTS),
         "retry_errors": job.get("retry_errors", []),
@@ -419,6 +512,7 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         "error_message": job.get("error_message"),
         "content": job.get("yuanbao_content") or "",
         "elapsed_ms": job.get("elapsed_ms"),
+        "transcription_elapsed_ms": job.get("transcription_elapsed_ms"),
         "yuanbao": {
             "preview_url": job.get("preview_url"),
         },
@@ -460,6 +554,11 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         result["thumbnail"] = {"filename": thumbnail_filename, **build_file_links(thumbnail_filename)}
     else:
         result["thumbnail"] = {"filename": None, "download_path": None, "download_url": None}
+    transcript_filename = job.get("transcript_filename")
+    result["transcript"] = (
+        {"filename": transcript_filename, **build_file_links(transcript_filename)}
+        if transcript_filename else {"filename": None, "download_path": None, "download_url": None}
+    )
     bundle_links = build_route_links(f"/api/history/{job['id']}/bundle")
     result["bundle"] = {
         "filename": job.get("bundle_filename"),
@@ -636,7 +735,7 @@ def api_history_delete(job_id: str):
             "code": "JOB_ACTIVE", "message": "任务仍在排队或执行，完成后才可删除",
         }}), 409
     deleted_files: list[str] = []
-    for key in ("text_filename", "video_filename", "thumbnail_filename", "bundle_filename"):
+    for key in ("text_filename", "video_filename", "thumbnail_filename", "transcript_filename", "bundle_filename"):
         path = safe_owned_path(DOWNLOAD_DIR, job.get(key))
         if path and path.exists():
             try:
@@ -664,6 +763,10 @@ def _process_parse_job(
                 downloader=download_video,
                 max_attempts=MAX_PARSE_ATTEMPTS,
                 sleeper=RETRY_SLEEPER,
+                transcriber=_local_transcribe if LOCAL_TRANSCRIPTION_ENABLED else None,
+                text_analyzer=analyze_transcript_with_yuanbao if LOCAL_TRANSCRIPTION_ENABLED else None,
+                cached_video_lookup=_cached_video,
+                cached_failed_analysis=_cached_failed_analysis if LOCAL_TRANSCRIPTION_ENABLED else None,
             )
     except Exception:
         # Never include credentials or private download URLs in worker logs.

@@ -105,6 +105,17 @@ class ParseApiTests(unittest.TestCase):
         self.assertTrue(body["text"]["download_url"].startswith("http://localhost/files/"))
         self.assertRegex(body["video"]["download_path"], r"^/files/Demo__\d{6}\.mp4$")
 
+    def test_history_api_includes_optional_transcription_duration(self):
+        r = self.post({"url": "https://weixin.qq.com/sph/demo", "download": False})
+        body = self.await_job(r.get_json()["id"])
+        self.assertIn("transcription_elapsed_ms", body)
+        self.assertIsNone(body["transcription_elapsed_ms"])
+        appmod.HISTORY_STORE.update_job(body["id"], transcription_elapsed_ms=187500)
+        updated = self.client.get(f"/api/history/{body['id']}", headers=self.auth()).get_json()["job"]
+        self.assertEqual(updated["transcription_elapsed_ms"], 187500)
+        history = self.client.get("/api/history", headers=self.auth()).get_json()["jobs"]
+        self.assertEqual(history[0]["transcription_elapsed_ms"], 187500)
+
     def test_invalid_output_format_returns_json_400_without_analyzer(self):
         calls = []
         appmod.analyze_with_yuanbao = lambda *_: calls.append(1)

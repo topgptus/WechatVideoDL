@@ -169,6 +169,32 @@ class HistoryApiTests(unittest.TestCase):
         self.assertEqual(response.get_json()["error"]["code"], "JOB_ACTIVE")
         self.assertIsNotNone(self.store.get_job("wxv_000212"))
 
+    def test_legacy_invalid_analysis_has_accurate_partial_or_failed_status(self):
+        self.create("wxv_000217", title="长视频")
+        self.store.update_job("wxv_000217", yuanbao_content="抱歉，未找到相关视频",
+                              video_filename="long_video.mp4")
+        partial = self.client.get("/api/history/wxv_000217", headers=self.headers)
+        self.assertEqual(partial.status_code, 200)
+        self.assertEqual(partial.get_json()["job"]["status"], "partial")
+        self.assertEqual(partial.get_json()["job"]["analysis_status"], "unavailable")
+
+        self.create("wxv_000218", title="没有视频")
+        self.store.update_job("wxv_000218", yuanbao_content="抱歉，未找到相关视频")
+        failed = self.client.get("/api/history/wxv_000218", headers=self.headers)
+        self.assertEqual(failed.get_json()["job"]["status"], "failed")
+
+    def test_transcript_download_link_is_serialized_when_present(self):
+        self.create("wxv_000219", title="完整口播")
+        transcript = self.downloads / "wxv_000219.transcript.txt"
+        transcript.write_text("人工校对的完整口播", encoding="utf-8")
+        self.store.update_job("wxv_000219", transcript_filename=transcript.name,
+                              analysis_source="local_transcript", analysis_status="completed")
+        r = self.client.get("/api/history/wxv_000219", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        job = r.get_json()["job"]
+        self.assertEqual(job["analysis_source"], "local_transcript")
+        self.assertTrue(job["transcript"]["download_path"].endswith(".transcript.txt"))
+
     def test_delete_tolerates_missing_optional_file(self):
         self.create("wxv_000209", title="缺文件")
         text = self.downloads / "缺文件__000209.md"
