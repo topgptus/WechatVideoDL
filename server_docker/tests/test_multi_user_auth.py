@@ -88,6 +88,202 @@ class MultiUserSecurityTests(unittest.TestCase):
             values["video_filename"]=video
         self.store.update_job(job_id, **values)
 
+    def establish_owner_and_second_admin(self):
+        # Simulate an arbitrary initial owner and a separate administrator.
+        existing = self.store
+        userdb = self.root / "auth.db"
+        appmod.USER_STORE = None
+        self.root.mkdir(exist_ok=True)
+        # Seed the privileged account without exposing a production password.
+        store = UserStore(userdb, seed_username="owner", seed_password="owner-test-pass-123")
+        appmod.USER_STORE = store
+        other = store.create_user(
+            username="otheradmin", password="other-admin-pass-123",role="admin"
+        )
+        return store.get_user_by_name("owner"), other
+
+    def test_unassigned_legacy_history_goes_to_protected_owner_not_first_admin(self):
+        owner, other = self.establish_owner_and_second_admin()
+        self.store.create_job(
+            id="wxv_000199",input_url="https://weixin.qq.com/sph/legacy",
+            prompt=None,preset_id=None,preset_name=None,output_format="md",
+            download_requested=False,max_attempts=3,
+        )
+        self.assertIsNone(self.store.get_job("wxv_000199")["owner_user_id"])
+        # 'otheradmin' sorts ahead of 'owner', but must never inherit
+        # legacy downloads merely because of the list ordering.
+        appmod.USER_STORE = None
+        appmod.get_user_store()
+        self.assertEqual(
+            self.store.get_job("wxv_000199")["owner_user_id"],owner["id"]
+        )
+        self.assertNotEqual(
+            self.store.get_job("wxv_000199")["owner_user_id"],other["id"]
+        )
+
+    def test_existing_two_admins_owner_is_promoted_without_password_loss(self):
+        from werkzeug.security import generate_password_hash
+        import sqlite3
+        from uuid import uuid4
+        owner_id=uuid4().hex
+        db=self.root/"auth.db"
+        with sqlite3.connect(str(db)) as conn:
+            conn.execute("""
+                CREATE TABLE users(
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('admin','member')),
+                    active INTEGER NOT NULL DEFAULT 1,
+                    session_version INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                INSERT INTO users(id,username,password_hash,role,active,session_version,created_at,updated_at)
+                VALUES(?,?,?,'admin',1,0,?,?)
+            """,(owner_id,"owner",generate_password_hash("prior-owner-pass-123",method="scrypt"),"2026-01-01","2026-01-01"))
+            conn.execute("""
+                INSERT INTO users(id,username,password_hash,role,active,session_version,created_at,updated_at)
+                VALUES(?,?,?,'admin',1,0,?,?)
+            """,(uuid4().hex,"founder",generate_password_hash("initial-secure-password",method="scrypt"),"2026-01-01","2026-01-01"))
+            before = conn.execute("SELECT password_hash FROM users WHERE id=?", (owner_id,)).fetchone()[0]
+        # Upgrade the old-style auth.db in-place without changing user IDs or hashes.
+        migrated = UserStore(
+            self.root / "auth.db",
+            seed_username="founder", seed_password="initial-secure-password",
+            bootstrap_superadmin_username="owner",
+        )
+        owner = migrated.get_user_by_name("owner")
+        self.assertTrue(owner["is_superadmin"])
+        self.assertTrue(owner["active"])
+        self.assertEqual(owner["role"], "admin")
+        self.assertEqual(owner["id"], owner_id)
+        self.assertIsNotNone(migrated.authenticate("owner", "prior-owner-pass-123"))
+        with sqlite3.connect(str(self.root / "auth.db")) as conn:
+            after = conn.execute("SELECT password_hash FROM users WHERE id=?", (owner_id,)).fetchone()[0]
+            self.assertEqual(after, before)
+            self.assertEqual(conn.execute("SELECT count(*) FROM users WHERE is_superadmin=1").fetchone()[0],1)
+        second = UserStore(self.root / "auth.db",
+                           seed_username="founder", seed_password="initial-secure-password")
+        self.assertEqual(second.get_user_by_name("owner")["session_version"],
+                         owner["session_version"])
+
+    def test_secondary_admin_cannot_modify_owner_by_any_management_endpoint(self):
+        owner, other = self.establish_owner_and_second_admin()
+        self.assertTrue(owner["is_superadmin"])
+        self.assertFalse(other["is_superadmin"])
+        self.assertEqual(self.signed_in(self.admin_client,"otheradmin","other-admin-pass-123").status_code,302)
+        token=self.current_csrf(self.admin_client)
+        base="/admin/users/"+owner["id"]
+        for endpoint,data in (
+            ("/password",{"password":"malicious-new-pass","confirm_password":"malicious-new-pass"}),
+            ("/role",{"role":"member"}),
+            ("/role",{"role":"admin"}),
+            ("/active",{"active":"0"}),
+            ("/active",{"active":"1"}),
+        ):
+            with self.subTest(endpoint=endpoint,data=data):
+                result=self.request(self.admin_client,"POST",base+endpoint,
+                                    data={"csrf_token":token,**data})
+                self.assertEqual(result.status_code,400)
+                self.assertIn("受保护",result.get_data(as_text=True))
+                account=appmod.get_user_store().get_user_by_name("owner")
+                self.assertTrue(account["is_superadmin"])
+                self.assertEqual(account["role"],"admin")
+                self.assertTrue(account["active"])
+        self.assertTrue(appmod.get_user_store().verify_password(owner["id"],"owner-test-pass-123"))
+        html=self.request(self.admin_client,"GET","/admin/users").get_data(as_text=True)
+        self.assertIn("超级管理员 · 受保护",html)
+        owner_card=html.split("<strong>owner</strong>", 1)[1].split("</article>",1)[0]
+        self.assertNotIn("<form",owner_card)
+        self.assertIn("受保护",owner_card)
+        self.assertEqual(self.request(self.admin_client,"POST","/admin/users",data={
+            "csrf_token":token,"username":"OWNER","password":"does-not-matter","role":"admin"
+        }).status_code,400)
+
+    def test_superadmin_protected_at_store_and_sqlite_layer(self):
+        import sqlite3
+        owner, other=self.establish_owner_and_second_admin()
+        store=appmod.get_user_store()
+        for action in (
+            lambda:store.set_password(owner["id"],"bad-change-password",actor_user_id=other["id"]),
+            lambda:store.set_role(owner["id"],"member",actor_user_id=other["id"]),
+            lambda:store.set_role(owner["id"],"admin",actor_user_id=other["id"]),
+            lambda:store.set_active(owner["id"],False,actor_user_id=other["id"]),
+            lambda:store.set_active(owner["id"],True,actor_user_id=other["id"]),
+        ):
+            with self.assertRaisesRegex(UserError,"SUPERADMIN_PROTECTED"):
+                action()
+        # Username uniqueness protects a real existing account, not a
+        # hard-coded special name.
+        with self.assertRaisesRegex(UserError,"USERNAME_TAKEN"):
+            store.create_user(username="OWNER",password="random-pass-4567",role="admin")
+        with self.assertRaisesRegex(UserError,"ROLE_INVALID"):
+            store.create_user(username="otherroot",password="random-pass-4567",role="superadmin")
+        subordinate=store.create_user(
+            username="team_member",password="member-pass-123",role="member"
+        )
+        # Ordinary admins retain authority over non-protected accounts.
+        store.set_role(subordinate["id"],"admin",actor_user_id=other["id"])
+        self.assertEqual(store.get_user(subordinate["id"])["role"],"admin")
+        store.set_password(
+            subordinate["id"],"new-member-pass-123",actor_user_id=other["id"]
+        )
+        self.assertIsNotNone(store.authenticate("team_member","new-member-pass-123"))
+        store.set_active(subordinate["id"],False,actor_user_id=other["id"])
+        self.assertFalse(store.get_user(subordinate["id"])["active"])
+        with sqlite3.connect(str(self.root/"auth.db")) as conn:
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE users SET is_superadmin=1 WHERE id=?",(other["id"],)
+                )
+            for sql in (
+                "UPDATE users SET role='member' WHERE id=?",
+                "UPDATE users SET active=0 WHERE id=?",
+                "UPDATE users SET is_superadmin=0 WHERE id=?",
+                "UPDATE users SET username='renamed_owner' WHERE id=?",
+                "DELETE FROM users WHERE id=?",
+            ):
+                with self.subTest(sql=sql):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        conn.execute(sql,(owner["id"],))
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM users WHERE is_superadmin=1"
+            ).fetchone()[0],1)
+
+    def test_owner_can_self_change_password_with_current_password_only(self):
+        owner,other=self.establish_owner_and_second_admin()
+        self.assertEqual(self.signed_in(self.admin_client,"owner","owner-test-pass-123").status_code,302)
+        csrf=self.current_csrf(self.admin_client)
+        before=appmod.get_user_store().get_user_by_name("owner")["session_version"]
+        wrong=self.request(self.admin_client,"POST","/account/password",data={
+            "csrf_token":csrf,"current_password":"wrong-pass",
+            "new_password":"changed-owner-pass-123","confirm_password":"changed-owner-pass-123"})
+        self.assertEqual(wrong.status_code,400)
+        with self.assertRaisesRegex(UserError,"CURRENT_PASSWORD_INVALID"):
+            appmod.get_user_store().set_password(
+                owner["id"],"changed-owner-pass-123",
+                actor_user_id=owner["id"],current_password="wrong-pass")
+        updated=self.request(self.admin_client,"POST","/account/password",data={
+            "csrf_token":csrf,"current_password":"owner-test-pass-123",
+            "new_password":"changed-owner-pass-123","confirm_password":"changed-owner-pass-123"})
+        self.assertEqual(updated.status_code,302)
+        owner_updated=appmod.get_user_store().get_user_by_name("owner")
+        self.assertTrue(owner_updated["is_superadmin"])
+        self.assertEqual(owner_updated["role"],"admin")
+        self.assertTrue(owner_updated["active"])
+        self.assertGreater(owner_updated["session_version"],before)
+        self.assertIsNone(appmod.get_user_store().authenticate("owner","owner-test-pass-123"))
+        self.assertEqual(self.signed_in(self.admin_client,"owner","changed-owner-pass-123").status_code,302)
+        self.assertIn("超级管理员",self.request(self.admin_client,"GET","/account").get_data(as_text=True))
+        # owner can still reset OTHER administrator's password and adjust role.
+        owner_csrf=self.current_csrf(self.admin_client)
+        changed=self.request(self.admin_client,"POST",f"/admin/users/{other['id']}/role",data={
+            "csrf_token":owner_csrf,"role":"member"})
+        self.assertEqual(changed.status_code,200)
+        self.assertEqual(appmod.get_user_store().get_user_by_name("otheradmin")["role"],"member")
+
     def test_first_admin_bootstrap_and_legacy_task_owned(self):
         self.store.create_job(
             id="wxv_000101",input_url="https://weixin.qq.com/sph/old",
@@ -246,9 +442,9 @@ class MultiUserSecurityTests(unittest.TestCase):
         store=appmod.get_user_store()
         admin=store.list_users()[0]
         with self.assertRaises(UserError):
-            store.set_active(admin["id"],False)
+            store.set_active(admin["id"],False,actor_user_id=admin["id"])
         with self.assertRaises(UserError):
-            store.set_role(admin["id"],"member")
+            store.set_role(admin["id"],"member",actor_user_id=admin["id"])
         store.create_user(username="testuser",password="password-12345")
         with self.assertRaises(UserError):
             store.create_user(username="TESTUSER",password="password-12345")
@@ -258,7 +454,8 @@ class MultiUserSecurityTests(unittest.TestCase):
         # Eight characters is the new minimum; symbol choice has no restriction.
         user=store.create_user(username="shortuser",password="abc#1234")
         self.assertIsNotNone(store.authenticate("shortuser","abc#1234"))
-        store.set_password(user["id"],"zoom#1980")
+        store.set_password(user["id"],"zoom#1980",
+                           actor_user_id=user["id"],current_password="abc#1234")
         self.assertIsNotNone(store.authenticate("shortuser","zoom#1980"))
         for password in ("", "a#12345", "x"*257):
             with self.subTest(length=len(password)):

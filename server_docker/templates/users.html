@@ -25,16 +25,20 @@
   <article class="panel user-card">
     <div class="user-heading"><strong>{{ user.username }}</strong>
       <span class="status-badge {{ 'completed' if user.active else 'failed' }}">{{ '已启用' if user.active else '已停用' }}</span>
-      <small>{{ '管理员' if user.role == 'admin' else '普通用户' }}</small>
+      <small>{{ '超级管理员 · 受保护' if user.is_superadmin else ('管理员' if user.role == 'admin' else '普通用户') }}</small>
     </div>
     <div class="user-actions">
+      {% if not user.is_superadmin %}
       <form method="post" action="{{ url_for('admin_reset_password', uid=user.id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>设置新密码<input name="password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
         <label>确认新密码<input name="confirm_password" type="password" required minlength="8" maxlength="256" autocomplete="new-password"></label>
         <button class="secondary-button" type="submit">重置密码</button>
       </form>
-      {% if user.id != current_user().id %}
+      {% endif %}
+      {% if user.is_superadmin %}
+      <p class="user-self-note user-protected-note" role="note">此账号为系统唯一超级管理员。其他管理员无法重置密码、调整权限或停用；该超级管理员本人可在「我的账号」验证当前密码后自行修改密码。</p>
+      {% elif user.id != current_user().id %}
       <form method="post" action="{{ url_for('admin_change_role', uid=user.id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label>权限<select name="role" class="select-input"><option value="member" {% if user.role == 'member' %}selected{% endif %}>普通用户</option><option value="admin" {% if user.role == 'admin' %}selected{% endif %}>管理员</option></select></label>
