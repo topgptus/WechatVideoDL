@@ -11,7 +11,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py browserless_function.js browserless_text_function.js history_store.py artifact_names.py job_files.py job_runner.py thumbnail_service.py bundle_service.py presets.py content_quality.py transcription_queue.py ./
+COPY app.py browserless_function.js browserless_text_function.js history_store.py user_store.py artifact_names.py job_files.py job_runner.py thumbnail_service.py bundle_service.py presets.py content_quality.py transcription_queue.py ./
 COPY templates ./templates
 COPY static ./static
 RUN mkdir -p /data/downloads

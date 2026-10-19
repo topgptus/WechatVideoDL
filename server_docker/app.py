@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import timedelta
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from typing import Any
 from urllib.parse import quote, urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
-from flask import Flask, Response, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
 from werkzeug.exceptions import BadRequest
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -24,6 +25,7 @@ try:
     from .transcription_queue import transcribe_with_host, TranscriptionError
     from .bundle_service import ensure_bundle
     from .history_store import HistoryStore
+    from .user_store import UserError, UserStore
     from .job_files import safe_owned_path
     from .job_runner import run_parse_job
     from .presets import PRESETS, get_preset
@@ -32,6 +34,7 @@ except ImportError:  # Docker runs modules from /app.
     from transcription_queue import transcribe_with_host, TranscriptionError
     from bundle_service import ensure_bundle
     from history_store import HistoryStore
+    from user_store import UserError, UserStore
     from job_files import safe_owned_path
     from job_runner import run_parse_job
     from presets import PRESETS, get_preset
@@ -64,6 +67,10 @@ MAX_PARSE_ATTEMPTS = min(3, max(1, int(os.environ.get("MAX_PARSE_ATTEMPTS", "3")
 RETRY_SLEEPER = time.sleep
 HISTORY_STORE: HistoryStore | None = None
 HISTORY_STORE_LOCK = threading.Lock()
+USER_STORE: UserStore | None = None
+USER_STORE_LOCK = threading.Lock()
+LOGIN_FAIL_LOCK = threading.Lock()
+LOGIN_FAILURES: dict[str, list[float]] = {}
 
 # A single Browserless session and a bounded backlog protect the host.
 MAX_PENDING_JOBS = max(1, int(os.environ.get("MAX_PENDING_JOBS", "8")))
@@ -85,6 +92,10 @@ app.secret_key = SECRET_KEY
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    # TLS is terminated at NPM; PUBLIC_BASE_URL may intentionally be blank.
+    # Never downgrade cookies merely because Flask sees an HTTP upstream.
+    SESSION_COOKIE_SECURE=os.environ.get("WEBUI_COOKIE_SECURE", "true").lower() not in {"0", "false", "no"},
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
 if TRUST_PROXY_HEADERS:
     app.wsgi_app = ProxyFix(
@@ -476,6 +487,21 @@ def get_history_store() -> HistoryStore:
     return HISTORY_STORE
 
 
+def get_user_store() -> UserStore:
+    global USER_STORE
+    target = DATA_DIR / "auth.db"
+    if USER_STORE is None or USER_STORE.db_path != target:
+        with USER_STORE_LOCK:
+            if USER_STORE is None or USER_STORE.db_path != target:
+                store = UserStore(target, seed_username=WEBUI_USERNAME, seed_password=WEBUI_PASSWORD)
+                USER_STORE = store
+                first_admin = next((user for user in store.list_users() if user["role"] == "admin"), None)
+                if first_admin:
+                    # Existing history stays visible to its original administrator.
+                    get_history_store().assign_legacy_jobs(first_admin["id"])
+    return USER_STORE
+
+
 def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
     video_title = str(job.get("video_title") or "").strip() or str(job.get("id") or "")
     raw_status = job.get("status")
@@ -581,23 +607,101 @@ def basic_credentials() -> tuple[str, str] | None:
     if not auth.lower().startswith("basic "):
         return None
     try:
-        raw = base64.b64decode(auth.split(None, 1)[1]).decode("utf-8")
-        return tuple(raw.split(":", 1))  # type: ignore[return-value]
-    except Exception:
+        raw = base64.b64decode(auth.split(None, 1)[1], validate=True).decode("utf-8")
+        parts = raw.split(":", 1)
+        return (parts[0], parts[1]) if len(parts) == 2 else None
+    except (ValueError, UnicodeError):
         return None
 
 
-def is_authorized() -> bool:
-    if session.get("logged_in") is True:
-        return True
+def current_user() -> dict[str, Any] | None:
+    if hasattr(g, "current_user"):
+        return g.current_user
+    g.auth_source = None
+    store = get_user_store()
+    uid = session.get("user_id")
+    version = session.get("user_version")
+    if isinstance(uid, str) and isinstance(version, int):
+        user = store.get_user(uid)
+        if user and user["active"] and user["session_version"] == version:
+            g.current_user = user
+            g.auth_source = "session"
+            return user
+        session.clear()
     creds = basic_credentials()
-    return bool(creds and secrets.compare_digest(creds[0], WEBUI_USERNAME) and secrets.compare_digest(creds[1], WEBUI_PASSWORD))
+    if creds and len(creds[0]) <= 64 and len(creds[1]) <= 256:
+        # Basic API clients use the same password database and failure
+        # throttling as form logins; environment bootstrap cannot bypass it.
+        if not _login_throttled(creds[0]):
+            user = store.authenticate(*creds)
+            _login_attempt(creds[0], bool(user))
+            if user:
+                g.current_user = user
+                g.auth_source = "basic"
+                return user
+    g.current_user = None
+    return None
+
+
+def csrf_token() -> str:
+    if not session.get("csrf"):
+        session["csrf"] = secrets.token_urlsafe(32)
+    return session["csrf"]
+
+
+@app.context_processor
+def auth_template_context():
+    return {"current_user": current_user, "csrf_token": csrf_token}
+
+
+def csrf_valid() -> bool:
+    supplied = request.form.get("csrf_token", "") or request.headers.get("X-CSRF-Token", "")
+    expected = session.get("csrf")
+    return bool(expected and supplied and secrets.compare_digest(str(supplied), str(expected)))
+
+
+@app.before_request
+def guard_unsafe_methods():
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if request.endpoint == "login":
+        if csrf_valid():
+            return None
+    elif request.endpoint in {"api_parse", "api_history_delete"}:
+        user = current_user()
+        if user and g.auth_source == "basic":
+            # For explicit Basic API clients, reject browser-supplied
+            # cross-site requests; CSRF token is still required for sessions.
+            origin = request.headers.get("Origin", "")
+            fetch_site = request.headers.get("Sec-Fetch-Site", "")
+            if fetch_site == "cross-site" or (origin and origin.rstrip("/") != request.host_url.rstrip("/")):
+                return jsonify({"ok": False, "error": {"code": "CSRF_INVALID", "message": "跨站写入被拒绝"}}), 403
+            return None
+        if not user:
+            return None  # Authorization decorator returns HTTP 401.
+        if csrf_valid():
+            return None
+    elif csrf_valid():
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": False, "error": {"code": "CSRF_INVALID", "message": "请求验证已过期，请刷新页面"}}), 403
+    return "请求验证失败，请刷新页面后重试", 403
+
+
+@app.after_request
+def auth_security_headers(response):
+    if not request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
 
 
 def api_or_session_required(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
-        if is_authorized():
+        if current_user():
             return fn(*args, **kwargs)
         if request.path.startswith("/api/") or request.path.startswith("/files/"):
             return jsonify({"ok": False, "error": {"code": "UNAUTHORIZED", "message": "需要登录"}}), 401
@@ -605,23 +709,178 @@ def api_or_session_required(fn):
     return wrapped
 
 
+def admin_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+        if not user:
+            return redirect(url_for("login"))
+        if user["role"] != "admin":
+            return "仅管理员可以进行此操作", 403
+        return fn(*args, **kwargs)
+    return wrapped
+
+
+def can_access_job(job: dict[str, Any] | None) -> bool:
+    user = current_user()
+    return bool(job and user and (user["role"] == "admin" or job.get("owner_user_id") == user["id"]))
+
+
+def _login_throttled(username: str) -> bool:
+    key = request.remote_addr + ":" + username.casefold()
+    now = time.monotonic()
+    with LOGIN_FAIL_LOCK:
+        recent = [t for t in LOGIN_FAILURES.get(key, []) if now - t < 900]
+        LOGIN_FAILURES[key] = recent
+        return len(recent) >= 6
+
+
+def _login_attempt(username: str, success: bool):
+    key = request.remote_addr + ":" + username.casefold()
+    with LOGIN_FAIL_LOCK:
+        if success:
+            LOGIN_FAILURES.pop(key, None)
+        else:
+            if len(LOGIN_FAILURES) > 4096:
+                # Prevent a flood of random username guesses from growing
+                # process memory without bound. Oldest buckets go first.
+                for oldest in sorted(LOGIN_FAILURES, key=lambda k: LOGIN_FAILURES[k][-1])[:1024]:
+                    LOGIN_FAILURES.pop(oldest, None)
+            LOGIN_FAILURES.setdefault(key, []).append(time.monotonic())
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if request.method == "GET" and current_user():
+        return redirect(url_for("index"))
     error = None
     if request.method == "POST":
-        u = request.form.get("username", "")
-        p = request.form.get("password", "")
-        if secrets.compare_digest(u, WEBUI_USERNAME) and secrets.compare_digest(p, WEBUI_PASSWORD):
-            session["logged_in"] = True
-            return redirect(url_for("index"))
-        error = "账号或密码错误"
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        if len(username) > 64 or len(password) > 256 or _login_throttled(username):
+            error = "登录尝试过多，请稍后再试"
+        else:
+            user = get_user_store().authenticate(username, password)
+            if user:
+                _login_attempt(username, True)
+                session.clear()
+                session.permanent = True
+                session["user_id"] = user["id"]
+                session["user_version"] = user["session_version"]
+                csrf_token()
+                return redirect(url_for("index"))
+            _login_attempt(username, False)
+            error = "账号或密码错误"
+    csrf_token()
     return render_template("login.html", error=error)
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
+@api_or_session_required
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+@app.route("/account")
+@api_or_session_required
+def account_page():
+    return render_template("account.html", error=None, message=None)
+
+
+@app.route("/account/password", methods=["POST"])
+@api_or_session_required
+def account_password():
+    user = current_user()
+    old = request.form.get("current_password", "")
+    new = request.form.get("new_password", "")
+    verify = request.form.get("confirm_password", "")
+    if not get_user_store().verify_password(user["id"], old):
+        return render_template("account.html", error="当前密码不正确", message=None), 400
+    if new != verify:
+        return render_template("account.html", error="新密码两次输入不一致", message=None), 400
+    try:
+        get_user_store().set_password(user["id"], new)
+    except UserError:
+        return render_template("account.html", error="密码至少需要 8 个字符", message=None), 400
+    session.clear()
+    return redirect(url_for("login"))
+
+
+def user_message(code: str) -> str:
+    return {
+        "PASSWORD_LENGTH": "密码至少需要 8 个字符",
+        "USERNAME_INVALID": "用户名只能使用字母、数字、点、下划线或连字符，最长 32 字符",
+        "USERNAME_TAKEN": "用户名已存在",
+        "LAST_ADMIN": "必须保留至少一位启用状态的管理员",
+        "ROLE_INVALID": "用户角色不正确",
+        "USER_NOT_FOUND": "账号不存在",
+    }.get(code, "操作未完成，请检查输入")
+
+
+@app.route("/admin/users")
+@admin_required
+def admin_users():
+    return render_template("users.html", users=get_user_store().list_users(),
+                           error=None, message=None)
+
+
+def users_feedback(error=None, message=None, code=200):
+    return render_template("users.html", users=get_user_store().list_users(),
+                           error=error, message=message), code
+
+
+@app.route("/admin/users", methods=["POST"])
+@admin_required
+def admin_create_user():
+    try:
+        user = get_user_store().create_user(
+            username=request.form.get("username", ""),
+            password=request.form.get("password", ""),
+            role=request.form.get("role", "member"),
+        )
+        return users_feedback(message="用户已创建：" + user["username"])
+    except UserError as exc:
+        return users_feedback(error=user_message(str(exc)), code=400)
+
+
+@app.route("/admin/users/<uid>/password", methods=["POST"])
+@admin_required
+def admin_reset_password(uid):
+    if uid == current_user()["id"]:
+        return users_feedback(error="请通过「我的账号」修改自己的密码", code=400)
+    if request.form.get("password") != request.form.get("confirm_password"):
+        return users_feedback(error="两次输入的新密码不一致", code=400)
+    try:
+        get_user_store().set_password(uid, request.form.get("password", ""))
+        return users_feedback(message="密码已重置，原有登录会话已失效")
+    except UserError as exc:
+        return users_feedback(error=user_message(str(exc)), code=400)
+
+
+@app.route("/admin/users/<uid>/role", methods=["POST"])
+@admin_required
+def admin_change_role(uid):
+    user = current_user()
+    if user["id"] == uid:
+        return users_feedback(error="不能在此修改自己的管理员身份", code=400)
+    try:
+        get_user_store().set_role(uid, request.form.get("role", ""))
+        return users_feedback(message="用户权限已更新")
+    except UserError as exc:
+        return users_feedback(error=user_message(str(exc)), code=400)
+
+
+@app.route("/admin/users/<uid>/active", methods=["POST"])
+@admin_required
+def admin_set_active(uid):
+    if current_user()["id"] == uid:
+        return users_feedback(error="不能禁用自己的账号", code=400)
+    try:
+        get_user_store().set_active(uid, request.form.get("active") == "1")
+        return users_feedback(message="账号状态已更新")
+    except UserError as exc:
+        return users_feedback(error=user_message(str(exc)), code=400)
 
 
 @app.route("/")
@@ -665,7 +924,19 @@ def health():
 @api_or_session_required
 def files(name: str):
     clean = Path(name).name
-    return send_from_directory(DOWNLOAD_DIR, clean, as_attachment=True)
+    if clean != name or not clean or clean.startswith("."):
+        return "文件不存在", 404
+    user = current_user()
+    owners = get_history_store().file_owners(clean)
+    # Unknown artifacts are not public, even to administrators.
+    # For members, every reference must belong to the same user; file names
+    # occasionally overlap across legacy jobs.
+    if not owners or (user["role"] != "admin" and owners != {user["id"]}):
+        return "文件不存在", 404
+    path = safe_owned_path(DOWNLOAD_DIR, clean)
+    if not path or not path.is_file():
+        return "文件不存在", 404
+    return send_file(path, as_attachment=True, download_name=clean)
 
 
 @app.route("/api/presets", methods=["GET"])
@@ -685,7 +956,14 @@ def api_history():
         limit = int(request.args.get("limit", "100"))
     except ValueError:
         limit = 100
-    jobs = [serialize_job(job) for job in get_history_store().list_jobs(limit=limit)]
+    user = current_user()
+    owner = None if user["role"] == "admin" else user["id"]
+    rows = get_history_store().list_jobs(limit=limit, owner_user_id=owner)
+    jobs = [serialize_job(row) for row in rows]
+    if user["role"] == "admin":
+        labels = {u["id"]: u["username"] for u in get_user_store().list_users()}
+        for job, row in zip(jobs, rows):
+            job["owner_username"] = labels.get(row.get("owner_user_id"), "未知用户")
     return jsonify({"ok": True, "jobs": jobs})
 
 
@@ -695,9 +973,13 @@ def api_history_detail(job_id: str):
     if not _valid_job_id(job_id):
         return jsonify({"ok": False, "error": {"code": "INVALID_JOB_ID", "message": "任务 ID 格式不正确"}}), 400
     job = get_history_store().get_job(job_id)
-    if job is None:
+    if not can_access_job(job):
         return jsonify({"ok": False, "error": {"code": "NOT_FOUND", "message": "历史记录不存在"}}), 404
-    return jsonify({"ok": True, "job": serialize_job(job)})
+    serialized = serialize_job(job)
+    if current_user()["role"] == "admin":
+        labels = {u["id"]: u["username"] for u in get_user_store().list_users()}
+        serialized["owner_username"] = labels.get(job.get("owner_user_id"), "未知用户")
+    return jsonify({"ok": True, "job": serialized})
 
 
 @app.route("/api/history/<job_id>/bundle", methods=["GET"])
@@ -707,10 +989,17 @@ def api_history_bundle(job_id: str):
         return jsonify({"ok": False, "error": {"code": "INVALID_JOB_ID", "message": "任务 ID 格式不正确"}}), 400
     store = get_history_store()
     job = store.get_job(job_id)
-    if job is None:
+    if not can_access_job(job):
         return jsonify({"ok": False, "error": {"code": "NOT_FOUND", "message": "历史记录不存在"}}), 404
     if job.get("status") != "completed":
         return jsonify({"ok": False, "error": {"code": "BUNDLE_NOT_READY", "message": "任务尚未完成"}}), 409
+    # A legacy filename can be referenced by more than one owner's job.
+    # Never hand out a shared artifact to a member via a ZIP side door.
+    if current_user()["role"] != "admin":
+        for key in ("text_filename", "video_filename", "thumbnail_filename", "transcript_filename"):
+            filename = job.get(key)
+            if filename and store.file_owners(filename) != {current_user()["id"]}:
+                return jsonify({"ok": False, "error": {"code": "NOT_FOUND", "message": "文件不可访问"}}), 404
     try:
         bundle = ensure_bundle(DOWNLOAD_DIR, job)
     except FileNotFoundError:
@@ -728,7 +1017,7 @@ def api_history_delete(job_id: str):
         return jsonify({"ok": False, "error": {"code": "INVALID_JOB_ID", "message": "任务 ID 格式不正确"}}), 400
     store = get_history_store()
     job = store.get_job(job_id)
-    if job is None:
+    if not can_access_job(job):
         return jsonify({"ok": False, "error": {"code": "NOT_FOUND", "message": "历史记录不存在"}}), 404
     if job.get("status") == "running":
         return jsonify({"ok": False, "error": {
@@ -737,7 +1026,7 @@ def api_history_delete(job_id: str):
     deleted_files: list[str] = []
     for key in ("text_filename", "video_filename", "thumbnail_filename", "transcript_filename", "bundle_filename"):
         path = safe_owned_path(DOWNLOAD_DIR, job.get(key))
-        if path and path.exists():
+        if path and path.exists() and not store.file_referenced_elsewhere(path.name, job_id):
             try:
                 path.unlink()
                 deleted_files.append(path.name)
@@ -750,7 +1039,7 @@ def api_history_delete(job_id: str):
 def _process_parse_job(
     job_id: str, input_url: str, prompt: str | None,
     preset: dict[str, Any] | None, output_format: str,
-    do_download: bool, store: HistoryStore,
+    do_download: bool, store: HistoryStore, owner_user_id: str,
 ) -> None:
     """Work continues even after the original HTTP client disconnects."""
     try:
@@ -814,10 +1103,11 @@ def api_parse():
                     output_format=output_format,
                     download_requested=do_download,
                     max_attempts=MAX_PARSE_ATTEMPTS,
+                    owner_user_id=current_user()["id"],
                 )
                 JOB_EXECUTOR.submit(
                     _process_parse_job, job_id, input_url, prompt, preset,
-                    output_format, do_download, store,
+                    output_format, do_download, store, current_user()["id"],
                 )
         except Exception:
             JOB_SLOTS.release()
