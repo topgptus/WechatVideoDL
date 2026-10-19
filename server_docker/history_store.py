@@ -37,9 +37,15 @@ JOB_COLUMNS = {
     "elapsed_ms",
     "transcript_filename",
     "transcription_elapsed_ms",
+    "transcription_chunk_count", "transcription_segment_count", "transcription_duration_seconds",
+    "analysis_chunk_count",
     "analysis_source",
     "analysis_status",
     "stage",
+    "owner_user_id",
+    "task_mode", "analyze_requested", "narration_requested", "raw_requested", "timed_requested",
+    "raw_transcript_filename", "timed_transcript_filename",
+    "batch_id", "batch_index", "queue_state",
 }
 
 
@@ -93,10 +99,18 @@ class HistoryStore:
                     elapsed_ms INTEGER,
                     transcript_filename TEXT,
                     transcription_elapsed_ms INTEGER,
+                    transcription_chunk_count INTEGER,
+                    transcription_segment_count INTEGER,
+                    transcription_duration_seconds REAL,
+                    analysis_chunk_count INTEGER,
                     analysis_source TEXT,
                     analysis_status TEXT,
                     stage TEXT,
-                    owner_user_id TEXT
+                    owner_user_id TEXT,
+                    task_mode TEXT, analyze_requested INTEGER, narration_requested INTEGER,
+                    raw_requested INTEGER, timed_requested INTEGER,
+                    raw_transcript_filename TEXT, timed_transcript_filename TEXT,
+                    batch_id TEXT, batch_index INTEGER, queue_state TEXT
                 )
                 """
             )
@@ -109,8 +123,28 @@ class HistoryStore:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
             if "transcription_elapsed_ms" not in existing:
                 conn.execute("ALTER TABLE jobs ADD COLUMN transcription_elapsed_ms INTEGER")
+            for name, field_type in (
+                ("transcription_chunk_count", "INTEGER"),
+                ("transcription_segment_count", "INTEGER"),
+                ("transcription_duration_seconds", "REAL"),
+                ("analysis_chunk_count", "INTEGER"),
+            ):
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {field_type}")
             if "owner_user_id" not in existing:
                 conn.execute("ALTER TABLE jobs ADD COLUMN owner_user_id TEXT")
+            for column in ('task_mode', 'raw_transcript_filename', 'timed_transcript_filename'):
+                if column not in existing:
+                    conn.execute(f'ALTER TABLE jobs ADD COLUMN {column} TEXT')
+            for column in ('analyze_requested', 'narration_requested', 'raw_requested', 'timed_requested'):
+                if column not in existing:
+                    conn.execute(f'ALTER TABLE jobs ADD COLUMN {column} INTEGER')
+            for name, dtype in (("batch_id", "TEXT"), ("batch_index", "INTEGER"),
+                                ("queue_state", "TEXT")):
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {dtype}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id,batch_index)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(queue_state,created_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_user_id,created_at DESC)")
 
@@ -121,8 +155,9 @@ class HistoryStore:
                 """
                 UPDATE jobs
                    SET status='failed', updated_at=?, error_code='INTERRUPTED',
-                       error_message='任务在服务重启前未完成，请重新提交。'
-                 WHERE status='running'
+                       error_message='任务在服务重启前未完成，请重新提交。',
+                       queue_state=CASE WHEN batch_id IS NOT NULL THEN 'finished' ELSE queue_state END
+                 WHERE status='running' AND coalesce(queue_state, '') NOT IN ('waiting','paused')
                 """,
                 (now,),
             )
@@ -139,6 +174,9 @@ class HistoryStore:
         download_requested: bool,
         max_attempts: int,
         owner_user_id: str | None = None,
+        task_mode: str | None = None, analyze_requested: bool = True,
+        narration_requested: bool = False, raw_requested: bool = False,
+        timed_requested: bool = False,
     ) -> dict[str, Any]:
         now = utc_now()
         with closing(self._connect()) as conn, conn:
@@ -147,8 +185,9 @@ class HistoryStore:
                 INSERT INTO jobs (
                     id, created_at, updated_at, input_url, prompt, preset_id, preset_name,
                     output_format, download_requested, status, attempts_used, max_attempts,
-                    retry_errors_json, owner_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, ?, '[]', ?)
+                    retry_errors_json, owner_user_id, task_mode, analyze_requested,
+                    narration_requested, raw_requested, timed_requested
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, ?, '[]', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     id,
@@ -161,12 +200,65 @@ class HistoryStore:
                     output_format,
                     1 if download_requested else 0,
                     int(max_attempts),
-                    owner_user_id,
+                    owner_user_id, task_mode, int(analyze_requested),
+                    int(narration_requested), int(raw_requested), int(timed_requested),
                 ),
             )
         result = self.get_job(id)
         assert result is not None
         return result
+
+    def create_batch_jobs(self, *, batch_id: str, owner_user_id: str,
+                          jobs: list[dict[str, Any]]) -> None:
+        """Insert all task records in one transaction; never partially accept a batch."""
+        if not jobs or len(jobs) > 30:
+            raise ValueError('INVALID_BATCH_SIZE')
+        now = utc_now()
+        with closing(self._connect()) as conn, conn:
+            for index, job in enumerate(jobs, 1):
+                conn.execute(
+                    """INSERT INTO jobs (id,created_at,updated_at,input_url,prompt,
+                    preset_id,preset_name,output_format,download_requested,status,
+                    attempts_used,max_attempts,retry_errors_json,owner_user_id,task_mode,
+                    analyze_requested,narration_requested,raw_requested,timed_requested,
+                    batch_id,batch_index,queue_state)
+                    VALUES (?,?,?,?,?,?,?,?,?,'running',0,?,'[]',?,?,?,?,?,?,?,?,'waiting')""",
+                    (job['id'],now,now,job['input_url'],job.get('prompt'),
+                     job.get('preset_id'),job.get('preset_name'),job['output_format'],
+                     int(job['download_requested']),int(job['max_attempts']),owner_user_id,
+                     job['task_mode'],int(job['analyze_requested']),
+                     int(job['narration_requested']),int(job['raw_requested']),
+                     int(job['timed_requested']),batch_id,index),
+                )
+
+    def batch_jobs(self, batch_id: str, *, owner_user_id: str | None = None) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            if owner_user_id is None:
+                rows = conn.execute('SELECT * FROM jobs WHERE batch_id=? ORDER BY batch_index',
+                                    (batch_id,)).fetchall()
+            else:
+                rows = conn.execute('SELECT * FROM jobs WHERE batch_id=? AND owner_user_id=? ORDER BY batch_index',
+                                    (batch_id,owner_user_id)).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def waiting_batch_jobs(self, limit: int) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("""SELECT * FROM jobs WHERE queue_state='waiting'
+                    AND status='running' ORDER BY created_at,id LIMIT ?""",
+                    (max(1,int(limit)),)).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def recent_batches(self, *, owner_user_id: str | None = None, limit: int = 12) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            if owner_user_id is None:
+                rows = conn.execute("""SELECT batch_id, MIN(created_at) AS created_at,
+                    COUNT(*) AS total FROM jobs WHERE batch_id IS NOT NULL
+                    GROUP BY batch_id ORDER BY created_at DESC LIMIT ?""", (limit,)).fetchall()
+            else:
+                rows = conn.execute("""SELECT batch_id, MIN(created_at) AS created_at,
+                    COUNT(*) AS total FROM jobs WHERE batch_id IS NOT NULL AND owner_user_id=?
+                    GROUP BY batch_id ORDER BY created_at DESC LIMIT ?""", (owner_user_id,limit)).fetchall()
+        return [dict(row) for row in rows]
 
     def update_job(self, job_id: str, **fields: Any) -> dict[str, Any] | None:
         if not fields:
@@ -202,6 +294,37 @@ class HistoryStore:
                 ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def page_jobs(self, *, page: int = 1, per_page: int = 20,
+                  owner_user_id: str | None = None, query: str = '') -> dict[str, Any]:
+        """Search all accessible history rows and paginate in SQLite."""
+        per_page = per_page if per_page in (10, 20, 50, 100) else 20
+        page = max(1, min(int(page), 1_000_000))
+        query = str(query or '').strip()[:150]
+        conditions = []
+        params: list[Any] = []
+        if owner_user_id is not None:
+            conditions.append('owner_user_id=?')
+            params.append(owner_user_id)
+        if query:
+            searchable = ('id', 'video_title', 'prompt', 'input_url', 'preset_name')
+            conditions.append('(' + ' OR '.join(
+                f"instr(lower(coalesce({column}, '')), lower(?)) > 0"
+                for column in searchable
+            ) + ')')
+            params.extend([query] * len(searchable))
+        where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+        with closing(self._connect()) as conn:
+            total = conn.execute('SELECT COUNT(*) FROM jobs' + where, params).fetchone()[0]
+            pages = max(1, (total + per_page - 1) // per_page)
+            page = min(page, pages)
+            rows = conn.execute(
+                'SELECT * FROM jobs' + where
+                + ' ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?',
+                [*params, per_page, (page - 1) * per_page],
+            ).fetchall()
+        return {'rows': [self._row_to_dict(row) for row in rows],
+                'page': page, 'per_page': per_page, 'pages': pages, 'total': total}
+
     def assign_legacy_jobs(self, owner_user_id: str) -> int:
         """Idempotently claim pre-multi-user history for the first admin."""
         with closing(self._connect()) as conn, conn:
@@ -219,8 +342,8 @@ class HistoryStore:
             rows = conn.execute(
                 """SELECT owner_user_id FROM jobs WHERE
                    text_filename=? OR video_filename=? OR thumbnail_filename=?
-                   OR transcript_filename=? OR bundle_filename=?""",
-                (filename,) * 5,
+                   OR transcript_filename=? OR raw_transcript_filename=? OR timed_transcript_filename=? OR bundle_filename=?""",
+                (filename,) * 7,
             ).fetchall()
         return {row["owner_user_id"] for row in rows}
 
@@ -231,8 +354,8 @@ class HistoryStore:
             row = conn.execute(
                 """SELECT 1 FROM jobs WHERE id<>? AND
                    (text_filename=? OR video_filename=? OR thumbnail_filename=?
-                    OR transcript_filename=? OR bundle_filename=?) LIMIT 1""",
-                (job_id, filename, filename, filename, filename, filename),
+                    OR transcript_filename=? OR raw_transcript_filename=? OR timed_transcript_filename=? OR bundle_filename=?) LIMIT 1""",
+                (job_id,) + (filename,) * 7,
             ).fetchone()
         return row is not None
 

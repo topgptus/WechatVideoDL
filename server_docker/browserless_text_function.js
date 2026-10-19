@@ -28,6 +28,10 @@ module.exports = async ({ page, context }) => {
   }
   if (cookies.length || extra.length) await page.setCookie(...cookies,...extra);
   await page.goto("https://yuanbao.tencent.com/",{waitUntil:"domcontentloaded",timeout:30000});
+  // Never post another task's voice transcript into an automatically restored old chat.
+  await page.waitForSelector('[aria-label="New Chat"]',{timeout:15000});
+  await page.click('[aria-label="New Chat"]');
+  await sleep(900);
   const editor='[contenteditable="true"]';
   await page.waitForSelector(editor,{timeout:30000});
   const input = [
@@ -53,7 +57,7 @@ module.exports = async ({ page, context }) => {
     await sleep(400);
     editorLen = await page.$eval(editor, el => (el.innerText || el.textContent || "").trim().length);
   }
-  if (editorLen < 40) throw new Error("TEXT_EDITOR_EMPTY");
+  if (editorLen < Math.floor(input.length * 0.85)) throw new Error("TEXT_EDITOR_INCOMPLETE");
   await page.waitForSelector("#yuanbao-send-btn",{timeout:12000});
   await page.click("#yuanbao-send-btn");
   await sleep(1400);

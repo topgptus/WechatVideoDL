@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import base64
+import io
+import zipfile
+import shutil
+import tempfile
 from datetime import timedelta
 import json
 import os
@@ -16,7 +20,7 @@ from typing import Any
 from urllib.parse import quote, urlparse, parse_qsl, urlencode, urlunparse
 
 import requests
-from flask import Flask, Response, g, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
+from flask import Flask, Response, g, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for, stream_with_context
 from werkzeug.exceptions import BadRequest
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -29,6 +33,11 @@ try:
     from .job_files import safe_owned_path
     from .job_runner import run_parse_job
     from .presets import PRESETS, get_preset
+    from .task_modes import resolve_options
+    from .job_progress import get_job_progress
+    from .yuanbao_credentials import (parse_netscape_cookies, parse_session, atomic_import,
+                                      credential_status, CredentialImportError, MAX_COOKIES_BYTES, MAX_SESSION_BYTES)
+    from .batch_input import collect_video_urls
 except ImportError:  # Docker runs modules from /app.
     from content_quality import refusal_reason
     from transcription_queue import transcribe_with_host, TranscriptionError
@@ -38,6 +47,11 @@ except ImportError:  # Docker runs modules from /app.
     from job_files import safe_owned_path
     from job_runner import run_parse_job
     from presets import PRESETS, get_preset
+    from task_modes import resolve_options
+    from job_progress import get_job_progress
+    from yuanbao_credentials import (parse_netscape_cookies, parse_session, atomic_import,
+                                    credential_status, CredentialImportError, MAX_COOKIES_BYTES, MAX_SESSION_BYTES)
+    from batch_input import collect_video_urls
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data")).resolve()
@@ -48,9 +62,9 @@ FUNCTION_FILE = Path(os.environ.get("BROWSERLESS_FUNCTION_FILE", APP_DIR / "brow
 TEXT_FUNCTION_FILE = APP_DIR / "browserless_text_function.js"
 LOCAL_TRANSCRIPTION_ENABLED = os.environ.get("LOCAL_TRANSCRIPTION_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 LOCAL_TRANSCRIPTION_TIMEOUT = int(os.environ.get("LOCAL_TRANSCRIPTION_TIMEOUT", "4500"))
-LOCAL_TRANSCRIPTION_MODEL = os.environ.get("LOCAL_TRANSCRIPTION_MODEL", "base").strip().lower()
-if LOCAL_TRANSCRIPTION_MODEL not in {"base", "small", "medium", "turbo", "sensevoice"}:
-    LOCAL_TRANSCRIPTION_MODEL = "base"
+LOCAL_TRANSCRIPTION_MODEL = os.environ.get("LOCAL_TRANSCRIPTION_MODEL", "sensevoice").strip().lower()
+if LOCAL_TRANSCRIPTION_MODEL != "sensevoice":
+    LOCAL_TRANSCRIPTION_MODEL = "sensevoice"
 SEQUENCE_FILE = DATA_DIR / "sequence.txt"
 
 BROWSERLESS_URL = os.environ.get("BROWSERLESS_URL", "http://browserless:3000").rstrip("/")
@@ -79,6 +93,7 @@ POLL_INTERVAL_SECONDS = min(30, max(1, int(os.environ.get("POLL_INTERVAL_SECONDS
 JOB_SLOTS = threading.BoundedSemaphore(MAX_PENDING_JOBS)
 JOB_SUBMISSION_LOCK = threading.Lock()
 JOB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-parse")
+BATCH_FUTURES: dict[str, Any] = {}
 
 USER_AGENT = os.environ.get(
     "BROWSER_USER_AGENT",
@@ -131,62 +146,21 @@ def valid_input_url(value: str) -> str:
 
 
 def load_cookies() -> list[dict[str, Any]]:
-    if not COOKIE_FILE.exists():
-        raise AppError("COOKIE_FILE_MISSING", f"Cookie 文件不存在：{COOKIE_FILE}", 503)
-
-    out: list[dict[str, Any]] = []
-    now = int(time.time())
-    for raw in COOKIE_FILE.read_text("utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        http_only = False
-        if line.startswith("#HttpOnly_"):
-            http_only = True
-            line = line[len("#HttpOnly_"):]
-        elif not line or line.startswith("#"):
-            continue
-
-        parts = line.split("\t")
-        if len(parts) < 7:
-            continue
-
-        domain, _, path, secure, expires, name = parts[:6]
-        value = "\t".join(parts[6:])
-        domain_check = domain.lstrip(".").lower()
-        if not ("yuanbao.tencent.com" == domain_check or "yuanbao.tencent.com".endswith("." + domain_check)):
-            continue
-
-        try:
-            exp = int(expires or "0")
-        except ValueError:
-            exp = 0
-        if exp and exp < now:
-            continue
-
-        item: dict[str, Any] = {
-            "name": name,
-            "value": value,
-            "domain": domain,
-            "path": path or "/",
-            "secure": secure.upper() == "TRUE",
-            "httpOnly": http_only,
-        }
-        if exp:
-            item["expires"] = exp
-        out.append(item)
-
-    if not out:
-        raise AppError("COOKIE_EMPTY", "Cookie 文件没有可用于元宝的有效 Cookie", 503)
-    return out
+    try:
+        return parse_netscape_cookies(COOKIE_FILE.read_bytes())
+    except FileNotFoundError:
+        raise AppError('COOKIE_FILE_MISSING', '尚未导入元宝 Cookie，请联系管理员在设置中配置', 503) from None
+    except (CredentialImportError, OSError):
+        raise AppError('COOKIE_EMPTY', '元宝 Cookie 无效，请联系管理员重新导入', 503) from None
 
 
 def load_session_state() -> dict[str, Any]:
-    if not SESSION_FILE.exists():
+    if not SESSION_FILE.is_file():
         return {}
     try:
-        value = json.loads(SESSION_FILE.read_text("utf-8"))
-        return value if isinstance(value, dict) else {}
-    except Exception as exc:
-        raise AppError("SESSION_STATE_INVALID", f"元宝 session 状态文件无法读取：{exc}", 503) from exc
+        return parse_session(SESSION_FILE.read_bytes())
+    except (CredentialImportError, OSError):
+        raise AppError('SESSION_STATE_INVALID', '元宝 Session 无效，请联系管理员重新导入', 503) from None
 
 
 def browserless_function(source: str, context: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
@@ -209,9 +183,12 @@ def browserless_function(source: str, context: dict[str, Any], timeout: int | No
     # versions may respond HTTP 200 with an "error" field. Whitelist only
     # error identifiers, never return raw error payloads to the caller.
     error_codes = {
+        "YUANBAO_SEND_UNCONFIRMED": ("元宝消息发送未得到确认，请检查浏览器会话", 502),
         "YUANBAO_CARD_TIMEOUT": ("元宝视频卡片生成超时", 502),
         "YUANBAO_LOGIN_REQUIRED": ("元宝登录态已失效，需要重新登录", 401),
         "YUANBAO_EDITOR_EMPTY": ("元宝输入框未能正确填写", 502),
+        "YUANBAO_EDITOR_MISMATCH": ("元宝输入框内容未正确写入", 502),
+        "YUANBAO_NEW_CHAT_UNAVAILABLE": ("元宝新建对话入口不可用", 502),
         "WECHAT_VIDEO_URL_MISSING": ("无法提取视频真实地址", 502),
     }
     if r.status_code != 200:
@@ -235,12 +212,13 @@ def browserless_function(source: str, context: dict[str, Any], timeout: int | No
     return data
 
 
-def analyze_with_yuanbao(input_url: str, prompt: str | None) -> dict[str, Any]:
+def analyze_with_yuanbao(input_url: str, prompt: str | None, *, extract_only: bool = False) -> dict[str, Any]:
     if not FUNCTION_FILE.exists():
         raise AppError("FUNCTION_FILE_MISSING", f"Browserless 函数文件不存在：{FUNCTION_FILE}", 503)
     request_text = input_url if not prompt else f"{input_url}\n\n{prompt.strip()}"
     context = {
         "requestText": request_text,
+        "extractOnly": extract_only,
         "cookies": load_cookies(),
         "session": load_session_state(),
     }
@@ -248,7 +226,7 @@ def analyze_with_yuanbao(input_url: str, prompt: str | None) -> dict[str, Any]:
     content = str(result.get("yuanbaoContent") or "").strip()
     preview_url = str(result.get("previewUrl") or "").strip()
     direct_url = str(result.get("directUrl") or "").strip()
-    if not content:
+    if not content and not extract_only:
         raise AppError("YUANBAO_EMPTY_RESPONSE", "元宝回复为空", 502, result)
     if not preview_url:
         raise AppError("YUANBAO_PREVIEW_URL_MISSING", "没有解析到视频号完整链接", 502, result)
@@ -272,6 +250,24 @@ def analyze_transcript_with_yuanbao(transcript: str, prompt: str | None) -> str:
     """Hand local speech text back to Yuanbao, preserving the user's prompt."""
     if not TEXT_FUNCTION_FILE.is_file():
         raise AppError("TEXT_FUNCTION_MISSING", "纯文本分析功能尚未部署", 503)
+    if len(transcript) > 12000:
+        try:
+            from .long_video_analysis import collect_chunks, assemble_grounded_analysis
+        except ImportError:
+            from long_video_analysis import collect_chunks, assemble_grounded_analysis
+        script = TEXT_FUNCTION_FILE.read_text('utf8')
+        context = {'cookies': load_cookies(), 'session': load_session_state()}
+        def ask(text: str, instruction: str) -> str:
+            result = browserless_function(script, {**context, 'transcript':text,
+                          'prompt':instruction}, timeout=BROWSER_TIMEOUT)
+            answer = str(result.get('analysis') or '').strip()
+            if refusal_reason(answer) or len(answer)<70:
+                raise AppError('TEXT_AI_NO_ANSWER', '元宝没有返回可靠的口播分析', 502)
+            return answer
+        goal = prompt or '根据真实口播内容整理结构化知识笔记，保留关键原句。'
+        grouped = collect_chunks(transcript, goal, ask)
+        analysis, narration = assemble_grounded_analysis(grouped, goal, ask)
+        return analysis + '\n\n' + narration
     chunks = [transcript[i:i+5000] for i in range(0, len(transcript), 5000)]
     if not chunks or len(chunks) > 10:
         raise AppError("TRANSCRIPT_TOO_LONG", "转写文字过长，需要人工拆分后分析", 413)
@@ -299,8 +295,8 @@ def analyze_transcript_with_yuanbao(transcript: str, prompt: str | None) -> str:
     return ask(combined, goal + "\\n请综合各段结果，生成完整连贯的最终内容，避免遗漏。")
 
 
-def _cached_video(input_url: str) -> Path | None:
-    for row in get_history_store().list_jobs(limit=500):
+def _cached_video(input_url: str, *, owner_user_id: str | None = None) -> Path | None:
+    for row in get_history_store().list_jobs(limit=500, owner_user_id=owner_user_id):
         if row.get("input_url") != input_url or not row.get("video_filename"):
             continue
         path = safe_owned_path(DOWNLOAD_DIR, row["video_filename"], {"mp4"})
@@ -309,8 +305,8 @@ def _cached_video(input_url: str) -> Path | None:
     return None
 
 
-def _cached_failed_analysis(input_url: str) -> dict[str, Any] | None:
-    for row in get_history_store().list_jobs(limit=500):
+def _cached_failed_analysis(input_url: str, *, owner_user_id: str | None = None) -> dict[str, Any] | None:
+    for row in get_history_store().list_jobs(limit=500, owner_user_id=owner_user_id):
         if row.get("input_url") != input_url or not refusal_reason(row.get("yuanbao_content")):
             continue
         media = safe_owned_path(DOWNLOAD_DIR, row.get("video_filename"), {"mp4"})
@@ -333,7 +329,7 @@ def _local_transcribe(job_id: str, video: Path) -> tuple[str, str, int | None]:
         return transcribe_with_host(
             job_id, video, DATA_DIR, timeout_seconds=LOCAL_TRANSCRIPTION_TIMEOUT,
             model=LOCAL_TRANSCRIPTION_MODEL,
-            include_elapsed_ms=True,
+            include_elapsed_ms=True, include_metrics=True,
         )
     except TranscriptionError as exc:
         raise AppError(
@@ -517,7 +513,13 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         analysis_status = "unavailable" if refusal_reason(job.get("yuanbao_content")) else "completed"
     public_status = raw_status
     if raw_status == "completed" and analysis_status == "unavailable":
-        public_status = "partial" if job.get("video_filename") or job.get("transcript_filename") else "failed"
+        public_status = ("partial" if any(job.get(k) for k in
+                         ("video_filename", "transcript_filename", "raw_transcript_filename",
+                          "timed_transcript_filename"))
+                         else "failed") if job.get('analyze_requested') not in (0, False) else "completed"
+    if job.get('raw_requested') and job.get('error_code') and not (job.get('raw_transcript_filename') or job.get('timed_transcript_filename')):
+        if public_status == 'completed':
+            public_status = 'partial'
     result = {
         "id": job["id"],
         "title": video_title,
@@ -529,12 +531,18 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         "preset_id": job.get("preset_id"),
         "preset_name": job.get("preset_name"),
         "output_format": job.get("output_format"),
-        "download_requested": job.get("download_requested"),
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
+        "download_requested": job.get("download_requested"),
+        "task_mode": job.get("task_mode") or "legacy",
+        "batch_id": job.get("batch_id"),
+        "queue_state": job.get("queue_state"),
+        "analyze_requested": job.get("analyze_requested") is not False and job.get("analyze_requested") != 0,
+        "raw_requested": bool(job.get("raw_requested")),
         # Legacy SQLite allows only running/completed/failed. A pending
         # running record with zero attempts is represented as queued to clients.
-        "status": ("queued" if raw_status == "running"
-                   and not job.get("attempts_used") else public_status),
+        "status": ("paused" if raw_status == "running" and job.get('queue_state') == 'paused'
+                   else "queued" if raw_status == "running" and not job.get("attempts_used")
+                   else public_status),
         "stage": job.get("stage"),
         "analysis_status": analysis_status,
         "analysis_source": job.get("analysis_source"),
@@ -546,6 +554,11 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         "content": job.get("yuanbao_content") or "",
         "elapsed_ms": job.get("elapsed_ms"),
         "transcription_elapsed_ms": job.get("transcription_elapsed_ms"),
+        "transcription_chunk_count": job.get("transcription_chunk_count"),
+        "transcription_segment_count": job.get("transcription_segment_count"),
+        "transcription_duration_seconds": job.get("transcription_duration_seconds"),
+        "analysis_chunk_count": job.get("analysis_chunk_count"),
+        "progress": get_job_progress(job, DATA_DIR),
         "yuanbao": {
             "preview_url": job.get("preview_url"),
         },
@@ -565,7 +578,7 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         video_links = build_file_links(video_filename)
         video_path = safe_owned_path(DOWNLOAD_DIR, video_filename)
         result["video"] = {
-            "source_direct_url": job.get("source_direct_url"),
+            "source_direct_url": None,  # Signed media token never leaves owner-scoped playback route.
             "downloaded": True,
             "filename": video_filename,
             "bytes": job.get("video_bytes"),
@@ -574,7 +587,7 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         }
     else:
         result["video"] = {
-            "source_direct_url": job.get("source_direct_url"),
+            "source_direct_url": None,  # Signed media token never leaves owner-scoped playback route.
             "downloaded": False,
             "filename": None,
             "bytes": None,
@@ -582,16 +595,40 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
             "download_url": None,
             "media": None,
         }
+    # Playback is always authenticated and scoped to this task. Signed
+    # Tencent URLs stay server-side; never place media tokens in DOM / JSON.
+    from urllib.parse import urlsplit as _parse_playback_url
+    direct = _parse_playback_url(str(job.get("source_direct_url") or ""))
+    available = bool(video_filename or (direct.scheme == "https" and direct.hostname == "finder.video.qq.com" and direct.port in (None, 443)))
+    result["video"]["play_path"] = url_for("api_history_play", job_id=job["id"]) if available else None
     thumbnail_filename = job.get("thumbnail_filename")
     if thumbnail_filename:
         result["thumbnail"] = {"filename": thumbnail_filename, **build_file_links(thumbnail_filename)}
     else:
         result["thumbnail"] = {"filename": None, "download_path": None, "download_url": None}
     transcript_filename = job.get("transcript_filename")
+    # Classify the actual artifact, not whether *some* ASR happened on the job.
+    # Jobs can produce both raw ASR and an AI-edited narration.
+    result['transcript_kind'] = (
+        'raw_asr' if transcript_filename and (
+            transcript_filename in (job.get('raw_transcript_filename'),
+                                    job.get('timed_transcript_filename')) or
+            transcript_filename.endswith(('.transcript.txt', '.transcript-raw.md', '.transcript-raw.txt'))
+        ) else 'ai_edited'
+    )
     result["transcript"] = (
         {"filename": transcript_filename, **build_file_links(transcript_filename)}
         if transcript_filename else {"filename": None, "download_path": None, "download_url": None}
     )
+    for field, key in (("raw_transcript_filename", "raw_transcript"),
+                       ("timed_transcript_filename", "timed_transcript")):
+        name = job.get(field)
+        # Legacy jobs may contain both versions. The user's timing choice is
+        # authoritative: expose only one speech transcript, not two copies.
+        if field == "raw_transcript_filename" and job.get("timed_requested") and job.get("timed_transcript_filename"):
+            name = None
+        result[key] = ({"filename": name, **build_file_links(name)} if name else
+                       {"filename": None, "download_path": None, "download_url": None})
     bundle_links = build_route_links(f"/api/history/{job['id']}/bundle")
     result["bundle"] = {
         "filename": job.get("bundle_filename"),
@@ -674,9 +711,10 @@ def guard_unsafe_methods():
     if request.endpoint == "login":
         if csrf_valid():
             return None
-    elif request.endpoint in {"api_parse", "api_history_delete"}:
+    elif request.endpoint in {"api_parse", "api_history_delete", "api_history_bulk_delete",
+                                   "api_batches_create", "api_batch_action"}:
         user = current_user()
-        if user and g.auth_source == "basic":
+        if user and getattr(g, "auth_source", None) == "basic":
             # For explicit Basic API clients, reject browser-supplied
             # cross-site requests; CSRF token is still required for sessions.
             origin = request.headers.get("Origin", "")
@@ -789,10 +827,31 @@ def logout():
     return redirect(url_for("login"))
 
 
+def render_settings(active_section="account", *, account_error=None, account_message=None,
+                    users_error=None, users_message=None,
+                    yuanbao_error=None, yuanbao_message=None, status=200):
+    user = current_user()
+    if active_section in {"users", "yuanbao"} and user["role"] != "admin":
+        active_section = "account"
+    return render_template("settings.html", active_section=active_section,
+                           users=get_user_store().list_users() if user["role"] == "admin" else [],
+                           account_error=account_error, account_message=account_message,
+                           users_error=users_error, users_message=users_message,
+                           yuanbao_error=yuanbao_error, yuanbao_message=yuanbao_message,
+                           yuanbao_status=(credential_status(COOKIE_FILE, SESSION_FILE)
+                                           if user['role']=='admin' else None)), status
+
+
+@app.route("/settings")
+@api_or_session_required
+def settings_page():
+    return render_settings()
+
+
 @app.route("/account")
 @api_or_session_required
 def account_page():
-    return render_template("account.html", error=None, message=None)
+    return render_settings("account")
 
 
 @app.route("/account/password", methods=["POST"])
@@ -803,16 +862,16 @@ def account_password():
     new = request.form.get("new_password", "")
     verify = request.form.get("confirm_password", "")
     if not get_user_store().verify_password(user["id"], old):
-        return render_template("account.html", error="当前密码不正确", message=None), 400
+        return render_settings("account", account_error="当前密码不正确", status=400)
     if new != verify:
-        return render_template("account.html", error="新密码两次输入不一致", message=None), 400
+        return render_settings("account", account_error="新密码两次输入不一致", status=400)
     try:
         get_user_store().set_password(
             user["id"], new,
             actor_user_id=user["id"], current_password=old,
         )
     except UserError:
-        return render_template("account.html", error="密码至少需要 8 个字符", message=None), 400
+        return render_settings("account", account_error="密码至少需要 8 个字符", status=400)
     session.clear()
     return redirect(url_for("login"))
 
@@ -835,13 +894,11 @@ def user_message(code: str) -> str:
 @app.route("/admin/users")
 @admin_required
 def admin_users():
-    return render_template("users.html", users=get_user_store().list_users(),
-                           error=None, message=None)
+    return render_settings("users")
 
 
 def users_feedback(error=None, message=None, code=200):
-    return render_template("users.html", users=get_user_store().list_users(),
-                           error=error, message=message), code
+    return render_settings("users", users_error=error, users_message=message, status=code)
 
 
 @app.route("/admin/users", methods=["POST"])
@@ -919,6 +976,12 @@ def history_page():
 
 @app.route("/health")
 def health():
+    # Re-admit durable waiting batch items after a worker restart. A batch
+    # worker always remains single-threaded, even after recovery.
+    try:
+        _dispatch_batch_waiting()
+    except Exception:
+        app.logger.warning("Batch recovery was deferred until next health check")
     browserless = False
     detail = ""
     try:
@@ -933,13 +996,70 @@ def health():
         "browserless": browserless,
         "cookie_file": COOKIE_FILE.exists(),
         "busy": PROCESS_LOCK.locked(),
+        "detail": detail,
         "async_jobs": True,
         "max_pending_jobs": MAX_PENDING_JOBS,
         "worker_model": "single-process",
-        "queue_persistent": False,
+        "queue_persistent": True,
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
-        "detail": detail,
     }), (200 if browserless and COOKIE_FILE.exists() else 503)
+
+
+@app.route('/admin/yuanbao/import/<kind>', methods=['POST'])
+@admin_required
+def admin_yuanbao_import(kind: str):
+    if kind not in ('cookies', 'session'):
+        return render_settings('yuanbao',yuanbao_error='不支持的文件类型',status=404)
+    max_bytes = MAX_COOKIES_BYTES if kind == 'cookies' else MAX_SESSION_BYTES
+    request.max_content_length = max_bytes + 32768
+    uploaded = request.files.get('credential_file')
+    if not uploaded or not uploaded.filename:
+        return render_settings('yuanbao',yuanbao_error='请选择需要导入的文件',status=400)
+    content = uploaded.stream.read(max_bytes+1)
+    try:
+        if kind == 'cookies':
+            count = len(parse_netscape_cookies(content))
+        else:
+            parse_session(content)
+            count = 0
+        # Prevent mid-job state changes: both task processing and imports
+        # require the same lock. A busy worker yields an immediate response.
+        if not PROCESS_LOCK.acquire(blocking=False):
+            return render_settings('yuanbao',yuanbao_error='视频解析正在运行，请结束当前任务后再更新登录凭据',status=409)
+        try:
+            atomic_import(COOKIE_FILE if kind == 'cookies' else SESSION_FILE, content)
+        finally:
+            PROCESS_LOCK.release()
+    except CredentialImportError:
+        return render_settings('yuanbao',yuanbao_error=(
+            'Cookie 文件格式无效、过期或超出 512 KB 限制' if kind=='cookies' else
+            'Session 必须是有效的 JSON 状态文件，且不能超过 1 MB'),status=400)
+    except OSError:
+        return render_settings('yuanbao',yuanbao_error='服务器无法安全保存配置，请检查私有数据目录',status=503)
+    text = (f'Cookie 已更新，识别到 {count} 条可用项' if kind=='cookies' else
+            'Session 已更新')
+    return render_settings('yuanbao',yuanbao_message=text+'；可点击下方按钮检查元宝登录状态。')
+
+
+@app.route("/api/admin/browserless-diagnostic", methods=["GET"])
+@api_or_session_required
+def api_browserless_diagnostic():
+    user = current_user()
+    if user["role"] != "admin":
+        return jsonify({"ok": False, "error": {"code": "FORBIDDEN", "message": "仅管理员可运行诊断"}}), 403
+    script_path = APP_DIR / "browserless_diagnostic.js"
+    try:
+        result = browserless_function(script_path.read_text("utf-8"), {
+            "cookies": load_cookies(), "session": load_session_state(),
+        }, timeout=45)
+        allowed = ("yuanbaoPage", "editorPresent", "editorVisible", "sendButtonPresent",
+                   "sendButtonEnabled", "chatPresent", "loginPromptDetected",
+                   "verificationDetected", "cardSelectorPresent")
+        safe = {key: bool(result.get(key, False)) for key in allowed}
+        return jsonify({"ok": True, "read_only": True, "diagnostic": safe})
+    except AppError as exc:
+        return jsonify({"ok": False, "error": {"code": exc.code,
+                        "message": "元宝页面诊断失败，请检查 Browserless 与会话状态"}}), exc.status
 
 
 @app.route("/files/<path:name>")
@@ -980,13 +1100,84 @@ def api_history():
         limit = 100
     user = current_user()
     owner = None if user["role"] == "admin" else user["id"]
-    rows = get_history_store().list_jobs(limit=limit, owner_user_id=owner)
+    pagination = None
+    if any(key in request.args for key in ("page", "per_page", "q")):
+        def positive_int(name: str, default: int) -> int:
+            try:
+                return max(1, int(request.args.get(name, default)))
+            except (ValueError, TypeError):
+                return default
+        pagination = get_history_store().page_jobs(
+            page=positive_int("page", 1),
+            per_page=positive_int("per_page", 20),
+            owner_user_id=owner, query=request.args.get("q", ""),
+        )
+        rows = pagination["rows"]
+    else:
+        rows = get_history_store().list_jobs(limit=limit, owner_user_id=owner)
     jobs = [serialize_job(row) for row in rows]
     if user["role"] == "admin":
         labels = {u["id"]: u["username"] for u in get_user_store().list_users()}
         for job, row in zip(jobs, rows):
             job["owner_username"] = labels.get(row.get("owner_user_id"), "未知用户")
-    return jsonify({"ok": True, "jobs": jobs})
+    response = {"ok": True, "jobs": jobs}
+    if pagination is not None:
+        response["pagination"] = {key: pagination[key] for key in ("page", "pages", "per_page", "total")}
+    return jsonify(response)
+
+
+@app.route("/api/history/selection", methods=["GET"])
+@api_or_session_required
+def api_history_selection():
+    user = current_user()
+    owner = None if user["role"] == "admin" else user["id"]
+    store = get_history_store()
+    ids = []
+    query = request.args.get("q", "")
+    index = 1
+    while index <= 250:
+        page = store.page_jobs(page=index, per_page=20, owner_user_id=owner, query=query)
+        ids.extend(row['id'] for row in page['rows'] if row['status'] != 'running')
+        if index >= page['pages'] or len(ids) >= 5000:
+            break
+        index += 1
+    if page['total'] > 5000:
+        return jsonify({'ok': False, 'error': {'code': 'TOO_MANY_RESULTS',
+                       'message': '筛选结果超过 5000 条，请缩小范围'}}), 400
+    return jsonify({'ok': True, 'ids': ids, 'total': page['total']})
+
+
+@app.route("/api/history/bulk-delete", methods=["POST"])
+@api_or_session_required
+def api_history_bulk_delete():
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({'ok':False,'error':{'code':'INVALID_SELECTION','message':'无效的选择数据'}}), 400
+    ids = body.get('ids')
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(
+        not isinstance(x, str) or not _valid_job_id(x) for x in ids
+    ) or len(set(ids)) != len(ids):
+        return jsonify({'ok': False, 'error': {'code': 'INVALID_SELECTION',
+                       'message': '请提供 1–100 条有效且不重复的任务 ID'}}), 400
+    store = get_history_store()
+    jobs = [store.get_job(jid) for jid in ids]
+    if any(not can_access_job(job) for job in jobs):
+        return jsonify({'ok': False, 'error': {'code': 'FORBIDDEN',
+                       'message': '选择中含有无权操作的任务'}}), 403
+    if any(job['status'] == 'running' for job in jobs):
+        return jsonify({'ok': False, 'error': {'code': 'JOB_ACTIVE',
+                       'message': '选择中包含正在执行的任务，请先取消勾选'}}), 409
+    deleted = []
+    for job in jobs:
+        for key in ('text_filename', 'video_filename', 'thumbnail_filename',
+                    'transcript_filename', 'raw_transcript_filename',
+                    'timed_transcript_filename', 'bundle_filename'):
+            path = safe_owned_path(DOWNLOAD_DIR, job.get(key))
+            if path and path.exists() and not store.file_referenced_elsewhere(path.name, job['id']):
+                path.unlink(missing_ok=True)
+        store.delete_job(job['id'])
+        deleted.append(job['id'])
+    return jsonify({'ok': True, 'deleted_ids': deleted, 'count': len(deleted)})
 
 
 @app.route("/api/history/<job_id>", methods=["GET"])
@@ -1004,6 +1195,71 @@ def api_history_detail(job_id: str):
     return jsonify({"ok": True, "job": serialized})
 
 
+@app.route("/api/history/<job_id>/play", methods=["GET"])
+@api_or_session_required
+def api_history_play(job_id: str):
+    """Authenticated MP4 playback, including a private proxy to a signed
+    Tencent media URL for tasks that intentionally did not save the MP4.
+
+    This does NOT transfer or imitate a WeChat login session; remote signed
+    URLs may expire and must never be leaked to browser or third-party sites.
+    """
+    if not _valid_job_id(job_id):
+        return "视频不存在", 404
+    store = get_history_store()
+    job = store.get_job(job_id)
+    if not can_access_job(job):
+        return "视频不存在", 404
+    filename = job.get("video_filename")
+    if filename:
+        if current_user()["role"] != "admin" and store.file_owners(filename) != {current_user()["id"]}:
+            return "视频不可访问", 404
+        path = safe_owned_path(DOWNLOAD_DIR, filename, {"mp4"})
+        if path is None or not path.is_file():
+            return "视频文件不存在", 404
+        response = send_file(path, mimetype="video/mp4", as_attachment=False, conditional=True)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    from urllib.parse import urlsplit
+    remote = str(job.get("source_direct_url") or "")
+    parts = urlsplit(remote)
+    if (parts.scheme != "https" or parts.hostname != "finder.video.qq.com" or
+            parts.port not in (None,443) or parts.username or parts.password):
+        return "没有可用的视频地址", 404
+    range_header = request.headers.get("Range", "")
+    if range_header and not re.fullmatch(r"bytes=\d*-\d*", range_header):
+        return "不支持的视频范围请求", 416
+    try:
+        upstream = requests.get(remote, stream=True, allow_redirects=False,
+            timeout=(5, 35), headers=({"Range":range_header} if range_header else {}))
+    except requests.RequestException:
+        return "视频源暂时无法连接，可尝试在微信中打开原视频", 502
+    if upstream.status_code not in (200,206) or not (
+            upstream.headers.get("Content-Type", "").lower().startswith("video/") or
+            upstream.headers.get("Content-Type", "").lower().startswith("application/octet-stream")):
+        upstream.close()
+        return "视频源暂不可播放，授权链接可能已经过期。请从微信中打开或重新解析。", 502
+
+    def copy_media():
+        try:
+            for block in upstream.iter_content(chunk_size=256 * 1024):
+                if block:
+                    yield block
+        finally:
+            upstream.close()
+    result = Response(stream_with_context(copy_media()), status=upstream.status_code,
+                      mimetype="video/mp4", direct_passthrough=True)
+    for key in ("Content-Length", "Content-Range", "Accept-Ranges"):
+        value = upstream.headers.get(key)
+        if value:
+            result.headers[key] = value
+    result.headers["Cache-Control"] = "private, no-store"
+    result.headers["X-Content-Type-Options"] = "nosniff"
+    return result
+
+
 @app.route("/api/history/<job_id>/bundle", methods=["GET"])
 @api_or_session_required
 def api_history_bundle(job_id: str):
@@ -1018,7 +1274,8 @@ def api_history_bundle(job_id: str):
     # A legacy filename can be referenced by more than one owner's job.
     # Never hand out a shared artifact to a member via a ZIP side door.
     if current_user()["role"] != "admin":
-        for key in ("text_filename", "video_filename", "thumbnail_filename", "transcript_filename"):
+        for key in ("text_filename", "video_filename", "thumbnail_filename",
+                    "transcript_filename", "raw_transcript_filename", "timed_transcript_filename"):
             filename = job.get(key)
             if filename and store.file_owners(filename) != {current_user()["id"]}:
                 return jsonify({"ok": False, "error": {"code": "NOT_FOUND", "message": "文件不可访问"}}), 404
@@ -1046,7 +1303,7 @@ def api_history_delete(job_id: str):
             "code": "JOB_ACTIVE", "message": "任务仍在排队或执行，完成后才可删除",
         }}), 409
     deleted_files: list[str] = []
-    for key in ("text_filename", "video_filename", "thumbnail_filename", "transcript_filename", "bundle_filename"):
+    for key in ("text_filename", "video_filename", "thumbnail_filename", "transcript_filename", "raw_transcript_filename", "timed_transcript_filename", "bundle_filename"):
         path = safe_owned_path(DOWNLOAD_DIR, job.get(key))
         if path and path.exists() and not store.file_referenced_elsewhere(path.name, job_id):
             try:
@@ -1066,18 +1323,37 @@ def _process_parse_job(
     """Work continues even after the original HTTP client disconnects."""
     try:
         with PROCESS_LOCK:
+            initial = store.get_job(job_id) or {}
+            if initial.get('batch_id'):
+                store.update_job(job_id, queue_state='active')
+            task_settings = store.get_job(job_id) or {}
+            narration_prompt = prompt
+            if task_settings.get('narration_requested'):
+                narration_prompt = ((prompt or '请整理视频的核心内容。')
+                    + '\n请另外提供独立章节“完整口播脚本（整理版）”，按主题分段，保留关键原话。')
             run_parse_job(
-                job_id, input_url, prompt, preset, output_format, do_download,
+                job_id, input_url, narration_prompt, preset, output_format, do_download,
                 store=store,
                 download_dir=DOWNLOAD_DIR,
-                analyzer=analyze_with_yuanbao,
+                analyzer=lambda url, instruction: (
+                    analyze_with_yuanbao(url, instruction)
+                    if task_settings.get('analyze_requested') != 0
+                    else analyze_with_yuanbao(url, None, extract_only=True)
+                ),
                 downloader=download_video,
                 max_attempts=MAX_PARSE_ATTEMPTS,
                 sleeper=RETRY_SLEEPER,
                 transcriber=_local_transcribe if LOCAL_TRANSCRIPTION_ENABLED else None,
                 text_analyzer=analyze_transcript_with_yuanbao if LOCAL_TRANSCRIPTION_ENABLED else None,
-                cached_video_lookup=_cached_video,
-                cached_failed_analysis=_cached_failed_analysis if LOCAL_TRANSCRIPTION_ENABLED else None,
+                cached_video_lookup=lambda url: _cached_video(url, owner_user_id=owner_user_id),
+                cached_failed_analysis=(lambda url: _cached_failed_analysis(
+                    url, owner_user_id=owner_user_id)) if LOCAL_TRANSCRIPTION_ENABLED else None,
+                options={
+                    'analyze': task_settings.get('analyze_requested') != 0,
+                    'narration': bool(task_settings.get('narration_requested')),
+                    'raw': bool(task_settings.get('raw_requested')),
+                    'timed': bool(task_settings.get('timed_requested')),
+                },
             )
     except Exception:
         # Never include credentials or private download URLs in worker logs.
@@ -1087,7 +1363,40 @@ def _process_parse_job(
             error_message="后台任务发生内部错误，请检查服务日志",
         )
     finally:
+        if store.get_job(job_id) and (store.get_job(job_id) or {}).get('batch_id'):
+            store.update_job(job_id, queue_state='finished')
+        BATCH_FUTURES.pop(job_id, None)
         JOB_SLOTS.release()
+        _dispatch_batch_waiting()
+
+
+def _dispatch_batch_waiting() -> int:
+    """Feed the existing single Browserless worker without unbounded futures."""
+    admitted = 0
+    with JOB_SUBMISSION_LOCK:
+        store = get_history_store()
+        for row in store.waiting_batch_jobs(MAX_PENDING_JOBS):
+            if not JOB_SLOTS.acquire(blocking=False):
+                break
+            jid = row['id']
+            try:
+                store.update_job(jid, queue_state='scheduled')
+                future = JOB_EXECUTOR.submit(
+                    _process_parse_job, jid, row['input_url'], row.get('prompt'),
+                    get_preset(row.get('preset_id')), row['output_format'],
+                    bool(row['download_requested']), store, row['owner_user_id'],
+                )
+                BATCH_FUTURES[jid] = future
+                # Extremely short jobs may finish before submit() returns.
+                # Their finally block has already cleared the registry.
+                if future.done():
+                    BATCH_FUTURES.pop(jid, None)
+                admitted += 1
+            except Exception:
+                store.update_job(jid, status='failed', queue_state='finished',
+                                 error_code='BATCH_DISPATCH_FAILED',error_message='任务调度失败')
+                JOB_SLOTS.release()
+    return admitted
 
 
 @app.route("/api/parse", methods=["POST"])
@@ -1106,6 +1415,14 @@ def api_parse():
             raise AppError("INVALID_OUTPUT_FORMAT", "output_format 仅支持 txt 或 md", 400)
         do_download = bool(body.get("download", True))
         preset = get_preset(str(body.get("preset_id") or "") or None)
+        try:
+            options = resolve_options(body, preset_id=preset['id'] if preset else None,
+                                      prompt=prompt)
+        except ValueError as exc:
+            raise AppError('INVALID_TASK_OPTIONS', str(exc), 400) from exc
+        do_download = options['download']
+        if (options['raw'] and not LOCAL_TRANSCRIPTION_ENABLED):
+            raise AppError('LOCAL_WORKER_DISABLED', '原始逐字稿需要启用 SenseVoice 转写 worker', 503)
 
         if not JOB_SLOTS.acquire(blocking=False):
             raise AppError("QUEUE_FULL", "任务队列已满，请稍后再试", 429)
@@ -1126,6 +1443,9 @@ def api_parse():
                     download_requested=do_download,
                     max_attempts=MAX_PARSE_ATTEMPTS,
                     owner_user_id=current_user()["id"],
+                    task_mode=options['task_mode'], analyze_requested=options['analyze'],
+                    narration_requested=options['narration'], raw_requested=options['raw'],
+                    timed_requested=options['timed'],
                 )
                 JOB_EXECUTOR.submit(
                     _process_parse_job, job_id, input_url, prompt, preset,
@@ -1146,6 +1466,7 @@ def api_parse():
         response = jsonify({
             "ok": True, **serialize_job(store.get_job(job_id)),
             "poll_url": poll_path,
+            "poll_interval_seconds": POLL_INTERVAL_SECONDS,
         })
         response.status_code = 202
         response.headers["Location"] = poll_path
@@ -1161,7 +1482,7 @@ def api_parse():
             "code": exc.code, "message": exc.message,
         }})
         response.status_code = exc.status
-        if exc.code == "QUEUE_FULL":
+        if exc.status == 429:
             response.headers["Retry-After"] = str(POLL_INTERVAL_SECONDS)
         return response
     except Exception:
@@ -1169,6 +1490,269 @@ def api_parse():
         return jsonify({"ok": False, "error": {
             "code": "INTERNAL_ERROR", "message": "任务提交失败，请稍后重试",
         }}), 500
+
+
+@app.route("/batches")
+@api_or_session_required
+def batches_page():
+    _dispatch_batch_waiting()
+    return render_template("batches.html")
+
+
+def _batch_owner_filter() -> str | None:
+    user = current_user()
+    return None if user['role'] == 'admin' else user['id']
+
+
+def _serialize_batch(batch_id: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = {'queued':0,'paused':0,'running':0,'completed':0,'failed':0,'cancelled':0}
+    for row in rows:
+        state = row.get('queue_state')
+        if state=='paused': key='paused'
+        elif state in ('waiting','scheduled'): key='queued'
+        elif state=='cancelled': key='cancelled'
+        elif row['status']=='running': key='running'
+        else: key=row['status']
+        counts[key] += 1
+    return {'id':batch_id,'total':len(rows),'counts':counts,
+            'created_at':rows[0]['created_at'] if rows else None,
+            'jobs':[serialize_job(row) for row in rows]}
+
+
+@app.route("/api/batches",methods=["POST"])
+@api_or_session_required
+def api_batches_create():
+    body=request.get_json(silent=True)
+    if not isinstance(body,dict):
+        return jsonify({'ok':False,'error':{'code':'INVALID_BATCH','message':'请提供批量任务配置'}}),400
+    try:
+        urls,duplicate_count=collect_video_urls(body.get('urls') if 'urls' in body else body.get('text'))
+        fmt=str(body.get('output_format') or 'md').lower()
+        if fmt not in ('md','txt'):
+            raise ValueError('INVALID_OUTPUT_FORMAT')
+        preset=get_preset(str(body.get('preset_id') or '') or None)
+        options=resolve_options(body,preset_id=preset['id'] if preset else None,
+                                prompt=body.get('prompt'))
+    except ValueError as exc:
+        return jsonify({'ok':False,'error':{'code':str(exc),
+                        'message':'视频链接或任务选项有误，请检查后提交'}}),400
+    if options['raw'] and not LOCAL_TRANSCRIPTION_ENABLED:
+        return jsonify({'ok':False,'error':{'code':'LOCAL_WORKER_DISABLED',
+                        'message':'SenseVoice 尚未启用，不能批量生成逐字稿'}}),503
+    prompt_raw=body.get('prompt')
+    if prompt_raw is not None and not isinstance(prompt_raw,str):
+        return jsonify({'ok':False,'error':{'code':'INVALID_PROMPT','message':'Prompt 必须是文本'}}),400
+    prompt=(prompt_raw or '').strip() or None
+    if prompt and len(prompt)>12000:
+        return jsonify({'ok':False,'error':{'code':'PROMPT_TOO_LONG','message':'Prompt 太长'}}),400
+    batch_id='batch_'+secrets.token_hex(8)
+    store=get_history_store()
+    with JOB_SUBMISSION_LOCK:
+        tasks=[]
+        for url in urls:
+            tasks.append({'id':next_id(),'input_url':valid_input_url(url),'prompt':prompt,
+                'preset_id':preset['id'] if preset else None,
+                'preset_name':preset['name'] if preset else None,
+                'output_format':fmt,'download_requested':options['download'],
+                'max_attempts':MAX_PARSE_ATTEMPTS,'task_mode':options['task_mode'],
+                'analyze_requested':options['analyze'],
+                'narration_requested':options['narration'], 'raw_requested':options['raw'],
+                'timed_requested':options['timed']})
+        store.create_batch_jobs(batch_id=batch_id,owner_user_id=current_user()['id'],jobs=tasks)
+    _dispatch_batch_waiting()
+    rows=store.batch_jobs(batch_id,owner_user_id=current_user()['id'])
+    return jsonify({'ok':True,'batch':_serialize_batch(batch_id,rows),
+                    'duplicates_skipped':duplicate_count}),202
+
+
+@app.route("/api/batches",methods=["GET"])
+@api_or_session_required
+def api_batches_list():
+    _dispatch_batch_waiting()
+    store=get_history_store()
+    groups=store.recent_batches(owner_user_id=_batch_owner_filter())
+    return jsonify({'ok':True,'batches':[
+        _serialize_batch(group['batch_id'],store.batch_jobs(group['batch_id'],
+            owner_user_id=_batch_owner_filter())) for group in groups]})
+
+
+@app.route("/api/batches/<batch_id>",methods=["GET"])
+@api_or_session_required
+def api_batch_detail(batch_id: str):
+    store=get_history_store()
+    rows=store.batch_jobs(batch_id,owner_user_id=_batch_owner_filter()) if re.fullmatch(r'batch_[0-9a-f]{16}',batch_id) else []
+    if not rows:
+        return jsonify({'ok':False,'error':{'code':'NOT_FOUND','message':'批次不存在'}}),404
+    _dispatch_batch_waiting()
+    return jsonify({'ok':True,'batch':_serialize_batch(batch_id,store.batch_jobs(batch_id,
+                                            owner_user_id=_batch_owner_filter()))})
+
+
+@app.route("/api/batches/<batch_id>/texts.zip",methods=["GET"])
+@api_or_session_required
+def api_batch_export_texts(batch_id: str):
+    """Owner-authorized text bundle; no videos, credentials or oversized archives."""
+    store=get_history_store()
+    rows=store.batch_jobs(batch_id,owner_user_id=_batch_owner_filter()) if re.fullmatch(r'batch_[0-9a-f]{16}',batch_id) else []
+    if not rows:
+        return jsonify({'ok':False,'error':{'code':'NOT_FOUND','message':'批次不存在'}}),404
+    paths=[]
+    total=0
+    for row in rows:
+        seen=set()
+        for key in ('text_filename','transcript_filename','raw_transcript_filename','timed_transcript_filename'):
+            filename=row.get(key)
+            if not filename or filename in seen:
+                continue
+            seen.add(filename)
+            path=safe_owned_path(DOWNLOAD_DIR,filename,{'md','txt'})
+            if path is not None and path.is_file():
+                size=path.stat().st_size
+                total+=size
+                if total>50*1024*1024:
+                    return jsonify({'ok':False,'error':{'code':'BUNDLE_TOO_LARGE',
+                        'message':'文本合集超过 50 MB，请在历史记录中分别下载'}}),413
+                paths.append((row['id'],filename,path))
+    if not paths:
+        return jsonify({'ok':False,'error':{'code':'NO_TEXT_ARTIFACTS',
+                       'message':'此批次尚无文本成果，请等待任务完成'}}),404
+    output=io.BytesIO()
+    with zipfile.ZipFile(output,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as archive:
+        for job_id,filename,path in paths:
+            archive.write(path,arcname=f'{job_id}/{Path(filename).name}')
+    output.seek(0)
+    return send_file(output,mimetype='application/zip',as_attachment=True,
+                     download_name=f'{batch_id}-texts.zip')
+
+
+# A batch may contain multiple MP4s; unlike the legacy text-only ZIP, the
+# full archive is built on disk (unlinked temporary file), never in RAM.
+BATCH_BUNDLE_MAX_BYTES = 8 * 1024**3
+BATCH_BUNDLE_KEYS = (
+    'video_filename', 'text_filename', 'transcript_filename',
+    'raw_transcript_filename', 'timed_transcript_filename', 'thumbnail_filename',
+)
+BATCH_BUNDLE_EXTENSIONS = {'mp4', 'md', 'txt', 'jpg'}
+
+
+@app.route("/api/batches/<batch_id>/all.zip", methods=["GET"])
+@api_or_session_required
+def api_batch_export_all(batch_id: str):
+    """Download every existing artifact belonging to this owner's specific batch.
+
+    Unfinished batches intentionally export only material already on disk.
+    Never include saved sessions, credentials, private queues or old batch data.
+    """
+    store = get_history_store()
+    rows = (store.batch_jobs(batch_id, owner_user_id=_batch_owner_filter())
+            if re.fullmatch(r'batch_[0-9a-f]{16}', batch_id) else [])
+    if not rows:
+        return jsonify({'ok':False,'error':{'code':'NOT_FOUND',
+                       'message':'批次不存在'}}),404
+
+    paths = []
+    size_total = 0
+    for row in rows:
+        seen = set()
+        job_id = row['id']
+        for key in BATCH_BUNDLE_KEYS:
+            filename = row.get(key)
+            if not filename or filename in seen:
+                continue
+            seen.add(filename)
+            # safe_owned_path validates basename, extension and containment.
+            # Reject source symlinks, including those resolving inside downloads.
+            source = DOWNLOAD_DIR / str(filename)
+            if source.is_symlink():
+                continue
+            path = safe_owned_path(DOWNLOAD_DIR, filename, BATCH_BUNDLE_EXTENSIONS)
+            if path is None or not path.is_file():
+                continue
+            size_total += path.stat().st_size
+            if size_total > BATCH_BUNDLE_MAX_BYTES:
+                return jsonify({'ok':False,'error':{'code':'BUNDLE_TOO_LARGE',
+                    'message':'本批次成果超过单次打包上限（8 GB），请按任务分别下载'}}),413
+            paths.append((path, f"{job_id}/{path.name}"))
+    if not paths:
+        return jsonify({'ok':False,'error':{'code':'NO_ARTIFACTS',
+            'message':'此批次尚无可下载的成果，请等待任务生成文件'}}),404
+    # MP4 is already compressed, and a ZIP temporarily needs disk space.
+    # Keep a buffer so generating the archive cannot exhaust the host disk.
+    disk_free = shutil.disk_usage(DOWNLOAD_DIR).free
+    if disk_free < size_total + max(512 * 1024**2, size_total // 100):
+        return jsonify({'ok':False,'error':{'code':'INSUFFICIENT_DISK',
+            'message':'可用磁盘空间不足，暂时无法打包全部成果；可逐条下载'}}),507
+
+    output = tempfile.TemporaryFile(mode='w+b', dir=DOWNLOAD_DIR)
+    try:
+        with zipfile.ZipFile(output, mode='w', allowZip64=True) as archive:
+            for source, member in paths:
+                # Avoid recompressing MP4s and thumbnails, save CPU on Mac mini.
+                compression = (zipfile.ZIP_STORED if source.suffix.lower() in ('.mp4','.jpg')
+                               else zipfile.ZIP_DEFLATED)
+                archive.write(source, arcname=member, compress_type=compression)
+        output.seek(0)
+        response = send_file(output, mimetype='application/zip',
+                             as_attachment=True, download_name=f'{batch_id}-all.zip')
+        response.call_on_close(output.close)
+        return response
+    except OSError:
+        output.close()
+        app.logger.warning('Batch artifacts changed or ZIP creation failed: %s', batch_id)
+        return jsonify({'ok':False,'error':{'code':'BUNDLE_FAILED',
+            'message':'生成合集时有文件变化或空间不足，请稍后重试'}}),409
+
+
+@app.route("/api/batches/<batch_id>/action",methods=["POST"])
+@api_or_session_required
+def api_batch_action(batch_id: str):
+    body=request.get_json(silent=True) or {}
+    action=body.get('action') if isinstance(body,dict) else None
+    if action not in ('pause','resume','cancel','retry'):
+        return jsonify({'ok':False,'error':{'code':'INVALID_ACTION','message':'不支持的操作'}}),400
+    store=get_history_store()
+    with JOB_SUBMISSION_LOCK:
+        rows=store.batch_jobs(batch_id,owner_user_id=_batch_owner_filter()) if re.fullmatch(r'batch_[0-9a-f]{16}',batch_id) else []
+        if not rows:
+            return jsonify({'ok':False,'error':{'code':'NOT_FOUND','message':'批次不存在'}}),404
+        changed=0
+        active=0
+        for row in rows:
+            state=row.get('queue_state')
+            jid=row['id']
+            if state=='active':
+                active+=1
+                continue
+            if action in ('pause','cancel') and state in ('waiting','scheduled','paused'):
+                if state=='scheduled':
+                    future=BATCH_FUTURES.get(jid)
+                    if not future or not future.cancel():
+                        active+=1
+                        continue
+                    BATCH_FUTURES.pop(jid,None)
+                    JOB_SLOTS.release()
+                if action=='pause':
+                    if state=='paused':
+                        continue
+                    store.update_job(jid,queue_state='paused')
+                else:
+                    store.update_job(jid,queue_state='cancelled',status='failed',
+                                     error_code='BATCH_CANCELLED',error_message='用户取消了待执行任务')
+                changed+=1
+            elif action=='resume' and state=='paused':
+                store.update_job(jid,queue_state='waiting')
+                changed+=1
+            elif action=='retry' and row['status']=='failed' and state=='finished' and not any(
+                row.get(k) for k in ('video_filename','text_filename','transcript_filename',
+                                      'raw_transcript_filename','timed_transcript_filename')):
+                store.update_job(jid,queue_state='waiting',status='running',stage=None,
+                                 attempts_used=0,retry_errors=[],error_code=None,error_message=None)
+                changed+=1
+    if action in ('resume','retry','cancel','pause'):
+        _dispatch_batch_waiting()
+    return jsonify({'ok':True,'changed':changed,'active_uninterrupted':active,
+        'batch':_serialize_batch(batch_id,store.batch_jobs(batch_id,
+                owner_user_id=_batch_owner_filter()))})
 
 
 if __name__ == "__main__":

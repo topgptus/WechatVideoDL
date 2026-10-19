@@ -416,3 +416,314 @@ button:disabled { cursor:not-allowed;opacity:.50; }
   border-radius:12px;background:var(--surface-2);
   color:var(--muted);font-size:13px;line-height:1.65;
 }
+
+/* Settings: one predictable destination for infrequent account and system tasks. */
+.signed-in-user{display:inline-flex;align-items:center;gap:8px;max-width:210px;min-width:0;padding:0 8px;border-left:1px solid var(--border);font-size:13px;color:var(--muted)}
+.signed-in-label{white-space:nowrap;font-size:11px}
+.signed-in-user strong{color:var(--text);font-size:14px;font-weight:720;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.settings-intro h1{font-size:clamp(30px,4vw,44px)}
+.settings-shell{display:grid;grid-template-columns:minmax(190px,236px) minmax(0,1fr);gap:22px;align-items:start}
+.settings-sidebar{display:flex;flex-direction:column;gap:4px;padding:14px;box-shadow:none;position:sticky;top:102px;border-radius:18px}
+.settings-nav-caption{font-size:11px;font-weight:750;letter-spacing:.045em;color:var(--muted);padding:16px 12px 5px}
+.settings-nav-caption:first-child{padding-top:8px}
+.settings-nav-link{display:flex;align-items:center;min-height:44px;padding:10px 12px;border-radius:11px;font-size:14px;font-weight:630;color:var(--text)}
+.settings-nav-link:hover{background:var(--surface-2)}
+.settings-nav-link.is-active{background:color-mix(in srgb,var(--accent-ink) 11%,var(--surface-2));color:var(--accent-ink);font-weight:770}
+.settings-pane{display:none;min-width:0}
+.settings-pane.is-active{display:block;animation:settings-show .14s ease-out}
+@keyframes settings-show{from{opacity:.85}to{opacity:1}}
+.settings-pane-heading{margin:0 0 18px}
+.settings-pane-heading h2{font-size:clamp(21px,2.8vw,27px);letter-spacing:-.025em;margin:0 0 5px;line-height:1.2}
+.settings-pane-heading p{font-size:14px;color:var(--muted);margin:0;line-height:1.6}
+.settings-pane .account-panel{max-width:none;padding:26px;margin:0 0 20px;box-shadow:none}
+.settings-pane .account-panel .panel-heading{margin-bottom:18px}
+.settings-pane .account-form{max-width:570px}
+.settings-pane .user-directory{margin-top:18px}
+.settings-pane .user-directory h2{margin:0;font-size:18px}
+.settings-pane .user-card{box-shadow:none}
+.settings-card{padding:24px;box-shadow:none}
+.settings-field{display:grid;gap:10px;max-width:330px;font-size:14px;font-weight:700}
+.settings-field select{font-weight:500}
+.settings-help{margin:8px 0 0;color:var(--muted);font-size:13px;line-height:1.6}
+.settings-action-row{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap}
+.settings-action-row strong{font-size:15px}
+.settings-action-row button{min-height:44px}
+.settings-diagnostic-results{padding:14px 16px;margin-top:18px;border-radius:12px;background:var(--surface-2);border:1px solid var(--border);font-size:13px;color:var(--muted)}
+.settings-check-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 20px;margin:0}
+.settings-check-list>div{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)}
+.settings-check-list dt{color:var(--text)}
+.settings-check-list dd{margin:0;font-weight:740;white-space:nowrap}
+.settings-check-list .check-ok{color:var(--accent-ink)}
+.settings-check-list .check-warning{color:var(--danger)}
+:where(.settings-nav-link,.settings-action-row button,.settings-field select):focus-visible{outline:2px solid var(--accent-ink);outline-offset:3px}
+@media(prefers-reduced-motion:reduce){.settings-pane.is-active{animation:none}}
+@media(max-width:860px){
+  .settings-shell{grid-template-columns:minmax(0,1fr);gap:16px}
+  .settings-sidebar{position:static;display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;padding:10px}
+  .settings-nav-caption{display:none}
+  .settings-nav-link{flex:0 0 auto;padding:9px 14px}
+}
+@media(max-width:640px){
+  .primary-nav{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .signed-in-user{gap:3px;max-width:min(33vw,130px);padding-left:8px}
+  .signed-in-label{display:none}
+  .signed-in-user strong{font-size:13px}
+  .header-utilities .header-logout{padding:8px 7px;font-size:13px}
+  .settings-sidebar{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch;border-radius:14px}
+  .settings-sidebar::-webkit-scrollbar{display:none}
+  .settings-nav-link{white-space:nowrap;min-height:44px}
+  .settings-pane .account-panel,.settings-card{padding:18px}
+  .settings-pane-heading{margin-bottom:14px}
+  .settings-action-row{align-items:flex-start}
+  .settings-action-row button{width:100%}
+  .settings-check-list{grid-template-columns:minmax(0,1fr)}
+}
+
+/* Server-paginated history: navigable at compact and regular widths. */
+.history-toolbar{flex-wrap:wrap}
+.history-page-size{display:flex;align-items:center;gap:9px;white-space:nowrap;font-size:13px;color:var(--muted)}
+.history-page-size .select-input{width:auto;height:44px;padding:0 31px 0 12px;min-width:92px;font-size:14px}
+.history-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;padding:14px 18px;box-shadow:none}
+.history-page-summary{font-size:13px;color:var(--muted)}
+.history-page-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px}
+.history-page-actions button{min-height:44px;padding:8px 12px;font-size:13px}
+.history-page-actions button:disabled{opacity:.44;cursor:not-allowed}
+.history-page-position{min-width:55px;text-align:center;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+.history-pagination :is(button,select):focus-visible,.history-page-size .select-input:focus-visible{outline:2px solid var(--accent-ink);outline-offset:3px}
+@media(max-width:640px){
+  .history-page-size{margin-left:auto}
+  .history-pagination{flex-direction:column;align-items:stretch;padding:12px}
+  .history-page-actions{justify-content:space-between;gap:3px}
+  .history-page-actions button{min-height:44px;padding:8px 9px}
+  .history-page-position{min-width:45px}
+}
+
+/* Task modes: progressive disclosure rather than exposing every option at once. */
+.task-modes{border:0;padding:0;margin:0 0 20px;min-width:0}
+.task-modes legend{margin-bottom:10px}
+.task-mode-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(138px,1fr));gap:9px}
+.task-mode-grid label{position:relative;cursor:pointer;min-height:48px}
+.task-mode-grid input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.task-mode-grid span{display:flex;align-items:center;justify-content:center;min-height:48px;text-align:center;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);font-size:14px;font-weight:650;color:var(--text);transition:border-color .15s,background .15s}
+.task-mode-grid input:checked+span{border-color:var(--accent-ink);background:color-mix(in srgb,var(--accent-ink) 10%,var(--surface-2))}
+.task-mode-grid input:focus-visible+span{outline:2px solid var(--accent-ink);outline-offset:3px}
+.task-suboptions{display:flex;flex-wrap:wrap;gap:10px 22px;margin:12px 0 18px}
+.task-suboptions .toggle-line{min-height:44px}
+.task-output-hint{width:100%;font-size:13px;line-height:1.6;color:var(--muted);margin:0}
+.signed-in-label{font-size:14px}
+.signed-in-user{font-size:14px}
+.signed-in-user strong{font-size:15px}
+.header-utilities .header-logout{font-size:14px}
+.history-bulk-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 15px;margin:10px 0}
+.history-bulk-toolbar strong{font-size:14px;margin-right:auto}
+.history-bulk-toolbar button{min-height:44px}
+.history-card-selectable{position:relative}
+.history-select-item{display:flex;align-items:center;gap:8px;min-height:44px;cursor:pointer;padding:2px 5px;font-weight:650;font-size:13px}
+.history-select-item input{width:20px;height:20px;accent-color:var(--accent-ink)}
+.history-select-item input:focus-visible{outline:2px solid var(--accent-ink);outline-offset:4px}
+@media(max-width:640px){
+  .task-mode-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .task-suboptions{flex-direction:column;gap:2px}
+  .history-bulk-toolbar{gap:6px}
+  .history-bulk-toolbar button{flex:1 0 auto}
+  .signed-in-user strong{font-size:14px}
+}
+
+/* Selection controls remain out of the history card's content grid. */
+.history-card-selectable{position:relative}
+.history-card-selectable .history-select-item{position:absolute;right:13px;top:10px;z-index:2;border-radius:9px;background:var(--surface);padding:0 9px}
+.history-card-selectable .history-main{padding-right:72px}
+@media(max-width:640px){.history-card-selectable .history-main{padding-right:0}.history-card-selectable .history-select-item{top:9px;right:9px}}
+/* Apple HIG: the batch-selection entry is a touch target, not a tiny text link. */
+#history-select-toggle{min-height:44px;padding:9px 12px}
+
+/* Apple HIG: progressive disclosure for a child option of speech transcript. */
+.transcript-output-group{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:0}
+.transcript-output-group .toggle-line{min-height:44px}
+.transcript-time-option{margin-left:27px;padding-left:15px;border-left:2px solid var(--border);color:var(--muted)}
+.transcript-time-option:focus-within{border-color:var(--accent-ink)}
+.transcript-time-option span:last-child{font-size:14px}
+@media(max-width:640px){.transcript-time-option{margin-left:22px;padding-left:14px}}
+
+/* Apple HIG: progressive disclosure with actual backend-confirmed states. */
+.task-step-summary{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 12px;padding:12px 0 10px;border-bottom:1px solid var(--border)}
+.task-step-summary strong{font-size:14px;font-weight:730;color:var(--text)}
+.task-step-summary #progress-current{font-size:12px;color:var(--muted)}
+.task-step-list{list-style:none;margin:0;padding:10px 0 4px;display:grid;gap:3px}
+.task-step{display:grid;grid-template-columns:27px minmax(0,1fr) auto;align-items:center;gap:10px;min-height:42px;padding:5px 3px;color:var(--muted)}
+.task-step-indicator{display:grid;place-items:center;width:25px;height:25px;border-radius:50%;border:1px solid var(--border);background:var(--surface);font-size:12px;font-weight:700;color:var(--muted)}
+.task-step-name{font-size:14px;min-width:0;line-height:1.4}
+.task-step-state{font-size:12px;white-space:nowrap}
+.task-step-complete .task-step-indicator{background:color-mix(in srgb,var(--accent) 11%,var(--surface));border-color:var(--accent-ink);color:var(--accent-ink)}
+.task-step-complete .task-step-name{color:var(--text)}
+.task-step-active .task-step-indicator{background:color-mix(in srgb,var(--accent) 16%,var(--surface));border-color:var(--accent-ink);color:var(--accent-ink)}
+.task-step-active .task-step-name,.task-step-active .task-step-state{color:var(--accent-ink);font-weight:700}
+.task-step-failed .task-step-indicator,.task-step-failed .task-step-state{color:var(--danger);border-color:var(--danger)}
+.task-measured{font-size:12px;line-height:1.6;color:var(--text);padding:8px 10px;margin:9px 0;background:var(--surface);border:1px solid var(--border);border-radius:9px}
+.task-output-checklist{display:grid;gap:8px;margin:12px 0 17px}
+.task-output-checklist>strong{font-size:13px;font-weight:700;color:var(--muted)}
+.task-output-tags{display:flex;flex-wrap:wrap;gap:6px}
+.task-output-tag{display:inline-flex;align-items:center;min-height:30px;border:1px solid var(--border);border-radius:8px;padding:4px 9px;font-size:12px;color:var(--muted);background:var(--surface)}
+.task-output-ready{color:var(--accent-ink);border-color:color-mix(in srgb,var(--accent-ink) 35%,var(--border))}
+@media(max-width:640px){.task-step-summary{align-items:flex-start}.task-step{min-height:44px;gap:8px}}
+@media(prefers-reduced-motion:reduce){.task-step-indicator{transition:none}}
+
+.task-completion-details{border-bottom:1px solid var(--border);margin:0 0 16px;padding:0 0 8px}
+.task-completion-details summary{cursor:pointer;min-height:44px;display:flex;align-items:center;font-size:13px;color:var(--muted);font-weight:680}
+.task-completion-details summary:focus-visible{outline:2px solid var(--accent-ink);outline-offset:3px;border-radius:8px}
+.task-completion-details .task-step-list{padding-top:0}
+
+/* Accessible, owner-scoped inline playback and durable stage feedback. */
+.video-play-dialog{width:min(940px,calc(100vw - 32px));max-width:none;padding:20px;border:1px solid var(--border);border-radius:17px;color:var(--text);background:var(--surface);box-shadow:var(--shadow)}
+.video-play-dialog::backdrop{background:rgba(0,0,0,.75)}
+.video-play-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.video-play-dialog video{display:block;width:100%;max-height:70vh;background:#000;border-radius:9px}
+.video-play-note{font-size:12px;line-height:1.5;color:var(--muted);margin:12px 0 0}
+.video-play-error{font-size:13px;color:var(--danger);margin:8px 0;line-height:1.5}
+.play-source-button{border:1px solid var(--border);border-radius:8px;min-height:44px;background:var(--surface-2);font-weight:740;padding:8px 12px;cursor:pointer}
+.task-step-body{display:grid;gap:4px;min-width:0}
+.task-step-issue{font-size:12px;line-height:1.5;color:var(--danger);overflow-wrap:anywhere}
+.history-step-review{margin:14px 0;padding:10px 0;border-block:1px solid var(--border)}
+.history-step-review>strong{font-size:14px;font-weight:720;color:var(--text)}
+@media(max-width:640px){.video-play-dialog{padding:12px;width:calc(100vw - 20px)}}
+
+.video-source-inline-notice{flex-basis:100%;margin:4px 0 0;font-size:12px;line-height:1.55;color:var(--muted)}
+.video-play-heading #video-play-close{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;padding:8px 12px}
+
+/* Batch task center: explicit spacing, form groups and honest empty state.
+   Follows Apple HIG Layout / Entering Data / Buttons / Feedback. */
+.batch-intro{align-items:center;margin-bottom:24px;gap:20px}
+.batch-intro h1{font-size:clamp(30px,3.5vw,42px);line-height:1.1;letter-spacing:-.04em;margin:7px 0 10px}
+.batch-intro p{font-size:14px;line-height:1.65;max-width:740px}
+.batch-history-link{display:inline-flex;align-items:center;justify-content:center;gap:12px;white-space:nowrap;min-height:44px;font-size:13px}
+.batch-history-link span{font-size:17px;color:var(--accent-ink)}
+.batch-page-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:20px;align-items:start}
+.batch-create-panel,.batch-monitor-panel{display:flex;flex-direction:column;min-width:0;padding:24px 26px;border-radius:20px;gap:0}
+.batch-panel-heading{margin:0 0 21px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.batch-panel-heading h2{font-size:17px;font-weight:760}
+.batch-panel-caption{font-size:12px;color:var(--muted)}
+.batch-panel-content{display:flex;flex-direction:column;gap:19px;min-width:0}
+.batch-field-group{display:flex;flex-direction:column;gap:8px;min-width:0}
+.batch-field-group>.field-label{margin:0;font-size:13px;font-weight:700;line-height:1.5}
+.batch-field-caption{margin:0;min-height:22px}
+.batch-field-caption .field-label{margin:0;font-size:13px}
+.batch-counter{font-size:12px;color:var(--accent-ink);font-weight:720;white-space:nowrap}
+.batch-field-detail{font-weight:480;font-size:12px;color:var(--muted);margin-left:5px}
+.batch-create-panel .text-area,.batch-create-panel .select-input,.batch-monitor-panel .select-input{display:block;width:100%;margin:0;max-width:100%;font-size:14px;min-width:0}
+.batch-create-panel .text-area{padding:12px 14px;line-height:1.6;resize:vertical}
+.batch-create-panel .batch-url-input{min-height:125px;height:125px}
+.batch-create-panel .batch-prompt-input{min-height:82px;height:82px}
+.batch-field-row{display:grid;grid-template-columns:minmax(0,1.14fr) minmax(0,.86fr);gap:14px}
+.batch-help{font-size:12px;line-height:1.6;color:var(--muted);margin:0}
+.batch-flags{min-inline-size:0;margin:0;padding:11px 15px 12px;border:1px solid var(--border);border-radius:13px;display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.batch-flags legend{font-size:13px;font-weight:700;color:var(--text);padding:0 6px}
+.batch-flags label{display:flex;align-items:center;gap:9px;min-width:0;min-height:38px;padding:4px 2px;font-size:13px;line-height:1.45;color:var(--text);cursor:pointer}
+.batch-flags input{flex:0 0 auto;width:18px;height:18px;accent-color:var(--accent-ink)}
+.batch-analysis-fields{display:flex;flex-direction:column;gap:15px}
+.batch-create-footer{border-top:1px solid var(--border);padding-top:20px;margin-top:22px;display:flex;flex-direction:column;gap:9px}
+.batch-create-footer .action-button{height:48px;justify-content:center;gap:12px}
+.batch-feedback{font-size:12px;line-height:1.55;color:var(--muted);min-height:0;margin:0;overflow-wrap:anywhere}
+.batch-feedback:empty{display:none}
+.batch-monitor-content{display:flex;flex-direction:column;gap:17px;min-width:0}
+.batch-monitor-panel[data-empty="true"] #batch-monitor-content{display:none}
+.batch-monitor-panel[data-empty="false"] #batch-empty-state{display:none}
+.batch-empty-state{padding:40px 24px 34px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:9px}
+.batch-empty-symbol{width:64px;height:64px;border-radius:19px;display:grid;place-items:center;background:var(--surface-2);border:1px solid var(--border);color:var(--accent-ink);font-size:30px;font-weight:550;margin-bottom:10px}
+.batch-empty-state h3{font-size:17px;font-weight:740;letter-spacing:-.015em;margin:0}
+.batch-empty-state p{font-size:13px;line-height:1.7;color:var(--muted);max-width:330px;margin:0}
+.batch-empty-tip{font-size:11px;line-height:1.65;color:var(--muted);background:var(--surface-2);padding:8px 12px;border-radius:10px;margin-top:12px;max-width:350px}
+.batch-refresh-button{min-height:36px;padding:6px 10px;font-size:12px}
+.batch-summary{background:var(--surface-2);border:1px solid var(--border);padding:16px;border-radius:13px;font-size:13px;color:var(--text);line-height:1.5}
+.batch-summary strong{font-size:19px;font-weight:760;font-variant-numeric:tabular-nums}
+.batch-status-tags{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}
+.batch-status-tags span{border:1px solid var(--border);border-radius:8px;padding:4px 9px;font-size:12px;background:var(--surface)}
+.batch-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.batch-actions button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:0;padding:8px 10px;font-size:12px;line-height:1.4;white-space:normal}
+.batch-actions .danger-button{border-color:color-mix(in srgb,var(--danger) 40%,var(--border))}
+.batch-actions button:disabled{opacity:.46;cursor:not-allowed}
+.batch-control-note{padding:0 1px}
+.batch-list-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;border-top:1px solid var(--border);padding-top:15px}
+.batch-list-heading h3{font-size:14px;margin:0;font-weight:750}
+.batch-list-heading span{color:var(--muted);font-size:12px}
+.batch-job-list{list-style:none;margin:0;padding:0;display:grid;gap:9px;max-height:710px;overflow-y:auto}
+.batch-job{border:1px solid var(--border);border-radius:12px;padding:13px;background:var(--surface);display:grid;gap:7px}
+.batch-job-head{display:flex;align-items:start;justify-content:space-between;gap:10px}
+.batch-job-title{font-size:14px;line-height:1.45;font-weight:680;overflow-wrap:anywhere}
+.batch-job-meta{font-size:12px;color:var(--muted);line-height:1.55;overflow-wrap:anywhere}
+.batch-job-state{font-size:12px;font-weight:680;white-space:nowrap;color:var(--accent-ink)}
+.batch-job-state[data-state=failed],.batch-job-state[data-state=cancelled]{color:var(--danger)}
+.batch-job-state[data-state=paused]{color:var(--warning)}
+.batch-job-meter{height:5px;background:var(--surface-3);border-radius:9px;overflow:hidden}
+.batch-job-meter span{display:block;height:100%;background:var(--accent-ink);border-radius:9px}
+.batch-job-links{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.batch-job-links a{font-size:13px;color:var(--accent-ink)}
+.batch-empty{color:var(--muted);font-size:13px;padding:20px 5px}
+.batch-export-link{justify-content:center;min-height:44px;display:inline-flex;align-items:center;font-size:13px}
+@media(max-width:960px){.batch-page-grid{grid-template-columns:1fr}.batch-monitor-panel{min-height:0}.batch-intro{align-items:flex-start}}
+@media(max-width:560px){
+ .batch-intro{gap:16px;margin-bottom:19px}.batch-intro h1{font-size:32px}
+ .batch-intro p{font-size:13px}.batch-history-link{align-self:flex-start}
+ .batch-page-grid{gap:14px}.batch-create-panel,.batch-monitor-panel{padding:18px 16px;border-radius:17px}
+ .batch-panel-heading{margin-bottom:18px}.batch-field-row{grid-template-columns:1fr;gap:14px}
+ .batch-flags{grid-template-columns:1fr 1fr;padding:9px 10px}.batch-flags label{font-size:12px;min-height:44px}
+ .batch-empty-state{padding:28px 8px 24px}
+}
+@media(max-width:340px){.batch-flags{grid-template-columns:1fr}}
+/* Disclosure keeps the primary action in view without removing AI controls. */
+.batch-advanced-panel{border:1px solid var(--border);border-radius:13px;background:var(--surface);min-width:0}
+.batch-advanced-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px;padding:9px 15px;cursor:pointer;list-style:none;outline-offset:3px;color:var(--text)}
+.batch-advanced-summary::-webkit-details-marker{display:none}
+.batch-advanced-summary>span{font-weight:710;font-size:13px}
+.batch-advanced-summary>small{font-size:11px;color:var(--muted);font-weight:500}
+.batch-advanced-summary::after{content:"⌄";font-size:17px;color:var(--accent-ink);line-height:1;transition:transform .18s}
+.batch-advanced-panel[open]>.batch-advanced-summary::after{transform:rotate(180deg)}
+.batch-advanced-panel[open]>.batch-advanced-summary{border-bottom:1px solid var(--border)}
+.batch-advanced-panel .batch-analysis-fields{padding:16px;gap:16px}
+/* Keep the primary create action visible at a typical 900px desktop height. */
+body[data-page="batches"] .app-main{padding-top:32px}
+.batch-intro{margin-bottom:18px}
+.batch-panel-heading{margin-bottom:16px}
+.batch-panel-content{gap:15px}
+.batch-create-footer{margin-top:18px}
+@media(max-width:900px){body[data-page="batches"] .app-main{padding-top:24px}}
+@media(max-width:560px){body[data-page="batches"] .app-main{padding-top:18px}}
+
+/* Shared Yuanbao credentials: settings-only administrator interface. */
+.yuanbao-credential-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 0 15px}
+.credential-card{min-width:0;display:flex;flex-direction:column;gap:13px}
+.credential-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.credential-head strong{font-size:15px}
+.credential-head .status-badge{white-space:nowrap}
+.credential-card .settings-help{margin:0}
+.credential-meta{font-size:12px;margin:0;color:var(--muted)}
+.credential-form{margin-top:auto;display:grid;gap:10px;min-width:0}
+.credential-form label{font-weight:680;font-size:13px}
+.credential-form input[type=file]{color:var(--text);background:var(--surface-2);border:1px solid var(--border);border-radius:11px;min-width:0;width:100%;padding:10px;font-size:13px}
+.credential-form input[type=file]::file-selector-button{margin-right:10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);padding:8px;cursor:pointer}
+.credential-form input[type=file]:focus-visible{outline:2px solid var(--accent-ink);outline-offset:3px}
+.credential-form button{min-height:44px;width:100%}
+.credential-scope-note{margin:0 0 20px}
+@media(max-width:800px){.yuanbao-credential-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* 批量任务复用单任务设置组件，差别仅在多链接输入与统一执行说明。 */
+.batch-create-panel .task-modes{margin:0}
+.batch-create-panel .task-mode-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.batch-create-panel .batch-analysis-options{display:grid;gap:15px;min-width:0}
+.batch-create-panel .batch-analysis-options .field-stack{margin:0}
+.batch-create-panel .batch-analysis-options .field-label-row{margin-bottom:7px}
+.batch-create-panel .batch-prompt-input{height:auto;min-height:112px}
+.batch-create-panel .options-row{margin:0}
+.batch-create-panel .compact-field{min-width:min(100%,260px);max-width:100%}
+.batch-create-panel .task-suboptions{margin:0;gap:8px 17px}
+.batch-create-panel .task-suboptions .task-output-hint{font-size:12px}
+.batch-shared-note{margin:0;padding:11px 13px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);font-size:13px;line-height:1.7;color:var(--muted)}
+.batch-shared-note strong{color:var(--text);font-weight:710}
+.batch-create-panel .task-mode-grid span{font-size:13px}
+.batch-export-link{gap:10px;font-weight:740;white-space:normal;text-align:center}
+@media(max-width:1150px) and (min-width:961px){
+  .batch-create-panel .task-mode-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:640px){
+  .batch-create-panel .task-mode-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .batch-create-panel .task-suboptions{gap:1px}
+}

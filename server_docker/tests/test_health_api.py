@@ -44,7 +44,7 @@ class HealthApiTests(unittest.TestCase):
         self.assertTrue(body["async_jobs"])
         self.assertEqual(body["max_pending_jobs"], 8)
         self.assertEqual(body["worker_model"], "single-process")
-        self.assertFalse(body["queue_persistent"])
+        self.assertTrue(body["queue_persistent"])
         self.assertEqual(body["poll_interval_seconds"], 3)
 
 

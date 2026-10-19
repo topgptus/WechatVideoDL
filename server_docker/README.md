@@ -643,3 +643,10 @@ downloads/
 ```
 
 公网部署请使用 HTTPS 和强密码，并考虑限制来源 IP、VPN、Tailscale / ZeroTier 等。
+
+
+### 批量采集、统一设置与全成果导出
+
+在「批量任务」中粘贴多条视频号链接（单批最多 30 条），沿用单任务模式、提示词和输出选项；同一批次共用设置。后台持久队列串行处理，支持暂停/恢复/失败重试，ZIP 汇总本批已生成的 MP4、AI 文本、旁白、逐字稿与封面。见 [批量任务中心](../docs/BATCH-TASK-CENTER.md)。
+
+管理员可在「设置 → 元宝连接」导入全站共享 Cookie 和可选 Session，普通用户的任务与成果按账号隔离。见 [凭据配置](../docs/YUANBAO-ADMIN-CREDENTIALS.md)。

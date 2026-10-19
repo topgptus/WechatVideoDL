@@ -8,9 +8,33 @@
 </section>
 <section class="history-toolbar panel slim-panel">
   <div class="history-search-wrap"><span aria-hidden="true">⌕</span><label class="sr-only" for="history-filter">搜索历史记录</label><input id="history-filter" type="search" placeholder="按标题、任务 ID、链接或 Prompt 筛选" autocomplete="off"></div>
+  <label class="history-page-size" for="history-page-size">每页
+    <select id="history-page-size" class="select-input" aria-label="每页显示任务数">
+      <option value="10">10 条</option><option value="20">20 条</option>
+      <option value="50">50 条</option><option value="100">100 条</option>
+    </select>
+  </label>
+  <button id="history-select-toggle" class="text-button" type="button" aria-pressed="false">选择</button>
   <button id="refresh-history" class="text-button" type="button">刷新</button>
 </section>
+<div id="history-bulk-toolbar" class="history-bulk-toolbar panel hidden" role="region" aria-label="批量任务管理">
+  <strong id="history-selected-count" aria-live="polite">已选 0 条</strong>
+  <button type="button" id="history-select-page" class="text-button">全选本页</button>
+  <button type="button" id="history-select-all" class="text-button">全选筛选结果</button>
+  <button type="button" id="history-clear-selected" class="text-button">取消选择</button>
+  <button type="button" id="history-delete-selected" class="danger-button" disabled>删除选中任务</button>
+</div>
 <section id="history-list" class="history-list">
   <div class="history-empty panel"><div class="orbital-mark small"><span></span><span></span><span></span></div><p>正在加载历史记录…</p></div>
 </section>
+<nav class="history-pagination panel" id="history-pagination" aria-label="历史记录分页">
+  <span id="history-page-summary" class="history-page-summary" aria-live="polite">正在加载…</span>
+  <div class="history-page-actions">
+    <button class="secondary-button" type="button" id="history-first" aria-label="跳到第一页">首页</button>
+    <button class="secondary-button" type="button" id="history-prev" aria-label="上一页">上一页</button>
+    <span id="history-page-position" class="history-page-position">1 / 1</span>
+    <button class="secondary-button" type="button" id="history-next" aria-label="下一页">下一页</button>
+    <button class="secondary-button" type="button" id="history-last" aria-label="跳到最后一页">末页</button>
+  </div>
+</nav>
 {% endblock %}

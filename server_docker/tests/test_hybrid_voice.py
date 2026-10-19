@@ -56,7 +56,7 @@ class HybridVoiceTests(unittest.TestCase):
         )
         self.assertEqual(config["ProgramArguments"][-1], "sensevoice")
         env = config["EnvironmentVariables"]
-        self.assertEqual(env["LOCAL_ASR_FALLBACK_BASE"], "true")
+        self.assertEqual(env["LOCAL_ASR_FALLBACK_BASE"], "false")
         self.assertEqual(env["LOCAL_ASR_SENSEVOICE_PYTHON"], str(fake_python))
         self.assertEqual(env["LOCAL_ASR_SENSEVOICE_MODEL_DIR"], str(model))
         self.assertNotIn("TOKEN", env)
@@ -109,8 +109,12 @@ class HybridVoiceTests(unittest.TestCase):
             with patch("server_docker.scripts.host_transcription_worker.subprocess.run", side_effect=fake_ffmpeg):
                 with patch("server_docker.scripts.host_transcription_worker.subprocess.Popen", side_effect=fake_popen):
                     transcript = sensevoice_transcriber(mp4)
-        self.assertIn("离线语音识别", transcript)
+        transcript_text, stats = transcript
+        self.assertIn("离线语音识别", transcript_text)
+        self.assertGreaterEqual(stats["segment_count"], 1)
         self.assertEqual(mp4.read_bytes(), before)
+        # Successful transcription cleans private staging; interrupted jobs
+        # retain their checkpoint (covered by test_long_video_recovery).
         self.assertEqual(list((self.data / "transcription_queue").iterdir()), [])
 
     def test_app_dispatches_configured_local_asr_model(self):
@@ -127,7 +131,13 @@ class HybridVoiceTests(unittest.TestCase):
         from server_docker.scripts.setup_host_transcriber import make_plist
         fake_python = self.data / "python"
         fake_worker = self.data / "worker.py"
-        plist = make_plist(fake_python, fake_worker, self.data)
+        model = self.data / "sensevoice_model"
+        model.mkdir()
+        (model / "model.int8.onnx").write_bytes(b"test")
+        (model / "tokens.txt").write_text("test")
+        fake_python.write_text("test")
+        plist = make_plist(fake_python, fake_worker, self.data,
+                           sensevoice_python=fake_python, sensevoice_model_dir=model)
         self.assertTrue(plist["KeepAlive"])
         self.assertEqual(plist["ProgramArguments"][0], str(fake_python))
         self.assertNotIn("Sockets", plist)
@@ -138,13 +148,13 @@ class HybridVoiceTests(unittest.TestCase):
         mp4=(self.data/"downloads"/"clip.mp4")
         mp4.write_bytes(b"fake")
         request=self.data/"transcription_queue"/"wxv_000141.request.json"
-        request.write_text(json.dumps({"job_id":"wxv_000141","video_filename":"clip.mp4","model":"base"}))
+        request.write_text(json.dumps({"job_id":"wxv_000141","video_filename":"clip.mp4","model":"sensevoice"}))
         calls=[]
         def fake_transcribe(path, model):
             calls.append((path.name,model))
             return "这是一段测试语音识别的中文逐字稿，详细记录了视频中的讲话内容。"
         self.assertTrue(run_once(self.data, fake_transcribe))
-        self.assertEqual(calls,[("clip.mp4","base")])
+        self.assertEqual(calls,[("clip.mp4","sensevoice")])
         result=json.loads((self.data/"transcription_queue"/"wxv_000141.result.json").read_text())
         self.assertTrue(result["ok"])
         self.assertTrue((self.data/"downloads"/"wxv_000141.transcript.txt").is_file())
