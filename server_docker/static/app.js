@@ -848,7 +848,7 @@
       try {
         const { diagnostic: d = {} } = await safeFetch(routePath("api/admin/browserless-diagnostic"));
         const entries = [
-          ["元宝页面", d.yuanbaoPage], ["输入框", d.editorVisible],
+          ["元宝页面", d.yuanbaoPage], ["新建对话", d.newChatAvailable], ["输入框", d.editorVisible],
           ["发送按钮", d.sendButtonEnabled], ["聊天区域", d.chatPresent],
           ["登录提示", !d.loginPromptDetected], ["安全验证", !d.verificationDetected],
         ];

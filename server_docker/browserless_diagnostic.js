@@ -21,10 +21,14 @@ module.exports = async ({ page, context }) => {
     const body = document.body?.innerText || '';
     const editor = document.querySelector('[contenteditable="true"]');
     const send = document.querySelector('#yuanbao-send-btn');
+    const newChatAvailable = [...document.querySelectorAll(
+      '[aria-label="新建对话"], [aria-label="New Chat"]'
+    )].some(el => Boolean(el.getClientRects().length));
     return {
       yuanbaoPage: location.hostname === 'yuanbao.tencent.com',
       editorPresent: Boolean(editor),
       editorVisible: Boolean(editor?.getClientRects().length),
+      newChatAvailable,
       sendButtonPresent: Boolean(send),
       sendButtonEnabled: Boolean(send && !send.disabled),
       chatPresent: Boolean(document.querySelector('#chat-content')),

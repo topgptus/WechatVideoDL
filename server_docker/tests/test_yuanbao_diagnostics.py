@@ -14,7 +14,10 @@ class YuanbaoDiagnosticTests(unittest.TestCase):
 
     def test_new_chat_before_sending(self):
         source = (ROOT / 'browserless_function.js').read_text()
-        self.assertLess(source.index("page.click('[aria-label=\"New Chat\"]')"), source.index('page.click("#yuanbao-send-btn")'))
+        self.assertLess(source.index("await openFreshChat(page)"), source.index('page.click("#yuanbao-send-btn")'))
+        self.assertIn('[aria-label="新建对话"]', source)
+        self.assertIn('[aria-label="New Chat"]', source)
+        self.assertIn("candidate.boundingBox()", source)
 
     def test_send_acknowledgment_before_card_wait(self):
         source = (ROOT / 'browserless_function.js').read_text()
@@ -34,5 +37,6 @@ class YuanbaoDiagnosticTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertNotIn('secret', response.get_data(as_text=True))
             self.assertTrue(response.json['diagnostic']['editorVisible'])
+            self.assertIn('newChatAvailable', response.json['diagnostic'])
 
 if __name__ == '__main__': unittest.main()

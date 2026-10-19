@@ -10,9 +10,17 @@ class YuanbaoSendContractTests(unittest.TestCase):
 
     def test_every_task_opens_its_own_conversation(self):
         self.assertIn('YUANBAO_NEW_CHAT_UNAVAILABLE',self.script)
-        self.assertIn("page.click('[aria-label=\"New Chat\"]')",self.script)
-        self.assertLess(self.script.index('page.click(\'[aria-label="New Chat"]\')'),
+        self.assertIn('await openFreshChat(page)',self.script)
+        self.assertIn('[aria-label="新建对话"]',self.script)
+        self.assertIn('[aria-label="New Chat"]',self.script)
+        self.assertLess(self.script.index('await openFreshChat(page)'),
                         self.script.index('page.click("#yuanbao-send-btn")'))
+
+    def test_text_analysis_also_uses_visible_localized_new_chat(self):
+        source = (Path(__file__).resolve().parents[1] / 'browserless_text_function.js').read_text('utf8')
+        self.assertIn('await openFreshChat(page)',source)
+        self.assertIn('[aria-label="新建对话"]',source)
+        self.assertIn("candidate.boundingBox()",source)
 
     def test_editor_text_must_match_full_request(self):
         self.assertIn('editorText !== requestText',self.script)

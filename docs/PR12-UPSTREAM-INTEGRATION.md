@@ -38,3 +38,13 @@
 在 Pull Request 和 main 推送时运行 Python 测试、语法和双 Compose 配置检查。
 使用 pull_request（不是 pull_request_target）与 contents: read，不读取真实凭据或生产数据。
 模型文件和模型下载均不是自动测试的前置条件。
+
+
+## 真实环境修复：元宝页面多语言选择器（2026-10-19）
+
+Z254 Ubuntu 24.04 实测：元宝页面加载成功、会话有效，实际可见入口是
+`[aria-label="新建对话"]`，旧脚本只寻找 `[aria-label="New Chat"]`，
+导致任务在开始解析前报 `YUANBAO_NEW_CHAT_UNAVAILABLE`。
+视频解析与文本分析统一按中文/英文标签选择**可见**按钮；
+管理员只读诊断新增「新建对话」项，保留会话内容和密钥保护。
+补充不依赖真实账号的 Node 模拟点击测试及 Python 接口测试。

@@ -1,5 +1,22 @@
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Yuanbao uses localized ARIA labels; never assume an English-only UI.
+async function openFreshChat(page) {
+  const selectors = ['[aria-label="新建对话"]', '[aria-label="New Chat"]'];
+  for (let attempt = 0; attempt < 12; attempt++) {
+    for (const selector of selectors) {
+      for (const candidate of await page.$$(selector)) {
+        const box = await candidate.boundingBox();
+        if (!box || box.width <= 0 || box.height <= 0) continue;
+        await candidate.click();
+        return;
+      }
+    }
+    await sleep(350);
+  }
+  throw new Error("YUANBAO_NEW_CHAT_UNAVAILABLE");
+}
+
 module.exports = async ({ page, context }) => {
   const prompt = String(context?.prompt || "").trim();
   const transcript = String(context?.transcript || "").trim();
@@ -29,8 +46,7 @@ module.exports = async ({ page, context }) => {
   if (cookies.length || extra.length) await page.setCookie(...cookies,...extra);
   await page.goto("https://yuanbao.tencent.com/",{waitUntil:"domcontentloaded",timeout:30000});
   // Never post another task's voice transcript into an automatically restored old chat.
-  await page.waitForSelector('[aria-label="New Chat"]',{timeout:15000});
-  await page.click('[aria-label="New Chat"]');
+  await openFreshChat(page);
   await sleep(900);
   const editor='[contenteditable="true"]';
   await page.waitForSelector(editor,{timeout:30000});

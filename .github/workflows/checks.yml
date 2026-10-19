@@ -30,6 +30,9 @@ jobs:
           python -m compileall -q server_docker
           node --check server_docker/static/app.js
           node --check server_docker/browserless_function.js
+          node --check server_docker/browserless_text_function.js
+          node --check server_docker/browserless_diagnostic.js
+          node server_docker/tests/test_new_chat_selector.js
       - name: Default and optional Docker Compose configuration
         env:
           BROWSERLESS_TOKEN: test-only-placeholder

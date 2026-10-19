@@ -1064,7 +1064,7 @@ def api_browserless_diagnostic():
         result = browserless_function(script_path.read_text("utf-8"), {
             "cookies": load_cookies(), "session": load_session_state(),
         }, timeout=45)
-        allowed = ("yuanbaoPage", "editorPresent", "editorVisible", "sendButtonPresent",
+        allowed = ("yuanbaoPage", "editorPresent", "editorVisible", "newChatAvailable", "sendButtonPresent",
                    "sendButtonEnabled", "chatPresent", "loginPromptDetected",
                    "verificationDetected", "cardSelectorPresent")
         safe = {key: bool(result.get(key, False)) for key in allowed}
