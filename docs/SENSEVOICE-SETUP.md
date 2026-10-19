@@ -44,7 +44,7 @@ python3 scripts/install_sensevoice_model.py --archive /path/to/official-model.ta
 ### Compose 与权限隔离
 
 可选覆盖配置：`docker-compose.sensevoice.yml`，启用 `sensevoice` profile。
-worker `network_mode: none`、只读根文件系统、丢弃全部 Linux capabilities、禁止提权，
+worker `network_mode: none`、只读根文件系统、丢弃默认 capabilities，仅保留访问宿主私有队列所需的 DAC_OVERRIDE、禁止提权，
 仅有 `/data/downloads` 与 `/data/transcription_queue` 两个必要读写挂载，以及只读 `/models/sensevoice`。
 主程序的原 Compose **完全不需要**新增公网服务或 Docker 管理权限。
 Worker 的容器内 root 仅用于访问与现有 app 容器共享的私有文件；通过挂载边界阻止它读取 `/data` 中的账户和元宝凭据。

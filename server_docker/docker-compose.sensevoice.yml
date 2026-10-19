@@ -10,6 +10,10 @@ services:
     network_mode: "none"
     read_only: true
     cap_drop: ["ALL"]
+    # Bind-mounted videos/queue are owned by the host account, while the
+    # existing app stores output files as container root with mode 0600.
+    # This one capability is required for those two private RW mounts.
+    cap_add: ["DAC_OVERRIDE"]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 64
     mem_limit: 3g

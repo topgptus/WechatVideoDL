@@ -26,6 +26,26 @@ JOB_ID = re.compile(r"^wxv_\d{6}$")
 MODEL_CACHE = {}
 
 
+def ensure_private_queue(queue: Path) -> None:
+    """Reject unsafe queue access without requiring CAP_FOWNER on host volumes.
+
+    In rootful Docker, the host's private bind-mount directory is owned by the
+    deployment account rather than container UID 0. The worker can operate
+    through a tightly scoped DAC_OVERRIDE capability without chmod'ing a
+    directory it does not own.
+    """
+    if queue.is_symlink():
+        raise ValueError("UNSAFE_QUEUE_DIRECTORY")
+    queue.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if queue.is_symlink() or not queue.is_dir():
+        raise ValueError("UNSAFE_QUEUE_DIRECTORY")
+    attrs = queue.stat()
+    if attrs.st_uid == os.geteuid():
+        os.chmod(queue, 0o700)
+    elif stat.S_IMODE(attrs.st_mode) & 0o077:
+        raise ValueError("UNSAFE_QUEUE_PERMISSIONS")
+
+
 def atomic_json(path: Path, obj: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name("." + path.name + ".tmp")
@@ -199,8 +219,7 @@ def process_request(data_dir: Path, payload: dict, transcribe: Callable[[Path, s
 
 def run_once(data_dir: Path, transcribe: Callable[[Path, str], str] = default_transcriber) -> bool:
     queue = data_dir / "transcription_queue"
-    queue.mkdir(parents=True, exist_ok=True)
-    os.chmod(queue, 0o700)
+    ensure_private_queue(queue)
     items = sorted(queue.glob("wxv_*.processing.json")) + sorted(queue.glob("wxv_*.request.json"))
     for item in items:
         match = re.fullmatch(r"(wxv_\d{6})\.(?:request|processing)\.json", item.name)
@@ -268,8 +287,7 @@ def main():
     except (OSError, subprocess.SubprocessError) as exc:
         raise SystemExit("SENSEVOICE_RUNTIME_UNAVAILABLE") from exc
     queue = data_dir / "transcription_queue"
-    queue.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(queue, 0o700)
+    ensure_private_queue(queue)
     if args.once:
         run_once(data_dir)
         return

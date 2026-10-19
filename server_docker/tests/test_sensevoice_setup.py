@@ -14,6 +14,7 @@ from unittest.mock import patch
 from server_docker.sensevoice_status import sensevoice_status
 from server_docker.scripts import install_sensevoice_model as installer
 from server_docker import app as appmod
+from server_docker.scripts.host_transcription_worker import ensure_private_queue
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -129,11 +130,23 @@ class SenseVoiceSetupTests(unittest.TestCase):
             self.assertEqual(response.get_json()["sensevoice"]["state"], "disabled")
             self.assertEqual(response.headers["Cache-Control"],"no-store")
 
+    def test_host_owned_private_queue_requires_no_fowner_capability(self):
+        directory = self.root / "private-queue"
+        directory.mkdir(mode=0o700)
+        with patch("server_docker.scripts.host_transcription_worker.os.geteuid", return_value=-1), \
+             patch("server_docker.scripts.host_transcription_worker.os.chmod") as chmod:
+            ensure_private_queue(directory)
+            chmod.assert_not_called()
+        directory.chmod(0o755)
+        with patch("server_docker.scripts.host_transcription_worker.os.geteuid", return_value=-1):
+            with self.assertRaisesRegex(ValueError, "UNSAFE_QUEUE_PERMISSIONS"):
+                ensure_private_queue(directory)
+
     def test_optional_docker_worker_has_strict_volume_boundary(self):
         compose = (ROOT / "docker-compose.sensevoice.yml").read_text("utf-8")
         for expected in ('profiles: ["sensevoice"]','network_mode: "none"',
                          "read_only: true",'cap_drop: ["ALL"]',
-                         "no-new-privileges:true","./data/downloads:/data/downloads",
+                         "no-new-privileges:true",'cap_add: ["DAC_OVERRIDE"]',"./data/downloads:/data/downloads",
                          "./data/transcription_queue:/data/transcription_queue",
                          "./models/sensevoice:/models/sensevoice:ro"):
             self.assertIn(expected,compose)
