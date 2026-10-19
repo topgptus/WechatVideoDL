@@ -95,7 +95,8 @@ class HistoryStore:
                     transcription_elapsed_ms INTEGER,
                     analysis_source TEXT,
                     analysis_status TEXT,
-                    stage TEXT
+                    stage TEXT,
+                    owner_user_id TEXT
                 )
                 """
             )
@@ -108,7 +109,10 @@ class HistoryStore:
                     conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
             if "transcription_elapsed_ms" not in existing:
                 conn.execute("ALTER TABLE jobs ADD COLUMN transcription_elapsed_ms INTEGER")
+            if "owner_user_id" not in existing:
+                conn.execute("ALTER TABLE jobs ADD COLUMN owner_user_id TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_user_id,created_at DESC)")
 
     def _reconcile_running_jobs(self) -> None:
         now = utc_now()
@@ -134,6 +138,7 @@ class HistoryStore:
         output_format: str,
         download_requested: bool,
         max_attempts: int,
+        owner_user_id: str | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         with closing(self._connect()) as conn, conn:
@@ -142,8 +147,8 @@ class HistoryStore:
                 INSERT INTO jobs (
                     id, created_at, updated_at, input_url, prompt, preset_id, preset_name,
                     output_format, download_requested, status, attempts_used, max_attempts,
-                    retry_errors_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, ?, '[]')
+                    retry_errors_json, owner_user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, ?, '[]', ?)
                 """,
                 (
                     id,
@@ -156,6 +161,7 @@ class HistoryStore:
                     output_format,
                     1 if download_requested else 0,
                     int(max_attempts),
+                    owner_user_id,
                 ),
             )
         result = self.get_job(id)
@@ -181,14 +187,54 @@ class HistoryStore:
             )
         return self.get_job(job_id)
 
-    def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_jobs(self, limit: int = 100, *, owner_user_id: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
-        with closing(self._connect()) as conn, conn:
-            rows = conn.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+        with closing(self._connect()) as conn:
+            if owner_user_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM jobs WHERE owner_user_id=? ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (owner_user_id, limit),
+                ).fetchall()
         return [self._row_to_dict(row) for row in rows]
+
+    def assign_legacy_jobs(self, owner_user_id: str) -> int:
+        """Idempotently claim pre-multi-user history for the first admin."""
+        with closing(self._connect()) as conn, conn:
+            result = conn.execute(
+                "UPDATE jobs SET owner_user_id=? WHERE owner_user_id IS NULL",
+                (owner_user_id,),
+            )
+        return result.rowcount
+
+    def file_owners(self, filename: str) -> set[str | None]:
+        """Identify every history record referencing a download basename."""
+        if not filename:
+            return set()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT owner_user_id FROM jobs WHERE
+                   text_filename=? OR video_filename=? OR thumbnail_filename=?
+                   OR transcript_filename=? OR bundle_filename=?""",
+                (filename,) * 5,
+            ).fetchall()
+        return {row["owner_user_id"] for row in rows}
+
+    def file_referenced_elsewhere(self, filename: str, job_id: str) -> bool:
+        if not filename:
+            return False
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """SELECT 1 FROM jobs WHERE id<>? AND
+                   (text_filename=? OR video_filename=? OR thumbnail_filename=?
+                    OR transcript_filename=? OR bundle_filename=?) LIMIT 1""",
+                (job_id, filename, filename, filename, filename, filename),
+            ).fetchone()
+        return row is not None
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with closing(self._connect()) as conn, conn:

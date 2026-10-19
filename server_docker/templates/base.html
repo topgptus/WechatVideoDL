@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}WechatVideoDL{% endblock %}</title>
   <script>
     (() => {
@@ -38,8 +39,17 @@
             <option value="dark">暗色</option>
           </select>
         </label>
-        <a class="nav-link muted-link" href="{{ url_for('logout') }}">退出</a>
-      </div>
+        {% if current_user() %}
+        <a class="nav-link" href="{{ url_for('account_page') }}" title="我的账号与密码">账号</a>
+        {% if current_user().role == 'admin' %}
+        <a class="nav-link" href="{{ url_for('admin_users') }}" title="创建用户与管理权限">用户管理</a>
+        {% endif %}
+        <form method="post" action="{{ url_for('logout') }}" class="header-logout-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="nav-link muted-link header-logout">退出</button>
+        </form>
+        {% endif %}
+      </nav>
     </header>
     <main class="app-main">{% block content %}{% endblock %}</main>
   </div>

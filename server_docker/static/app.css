@@ -374,3 +374,36 @@ button:disabled { cursor:not-allowed;opacity:.50; }
   .history-info-row dt { margin-bottom:4px; }
   .history-info-row dd { font-size:13px; }
 }
+
+/* Multi-user admin console: readable, keyboard- and touch-accessible. */
+.header-logout-form{margin:0}
+.header-logout{background:transparent;border:0;cursor:pointer;font-family:inherit}
+.account-intro h1{font-size:clamp(28px,4vw,44px)}
+.account-panel{max-width:720px;padding:28px;margin:0 0 24px}
+.account-form{display:grid;gap:16px}
+.account-form label,.user-actions label{display:grid;gap:7px;font-size:13px;font-weight:700;color:var(--text)}
+.account-form input,.user-actions input,.account-form select,.user-actions select{
+  width:100%;min-height:46px;border-radius:11px;border:1px solid var(--border);
+  background:var(--surface-2);color:var(--text);padding:8px 12px;font-size:16px;
+}
+.account-form button{max-width:300px;min-height:44px}
+.user-directory{display:grid;gap:16px}
+.user-directory h2{font-size:20px;margin:8px 0 0}
+.user-card{padding:22px}
+.user-heading{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.user-heading strong{font-size:17px}
+.user-heading small,.user-self-note{color:var(--muted)}
+.user-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;align-items:end}
+.user-actions form{display:grid;gap:10px;align-content:end}
+.user-actions button{min-height:44px}
+.user-actions .danger-button{font-size:13px}
+@media(max-width:700px){
+  .account-panel{padding:18px}
+  .user-actions{grid-template-columns:1fr}
+  .user-card{padding:18px}
+  .header-utilities{gap:3px}
+  .header-utilities .nav-link{padding:8px 6px;font-size:12px}
+  .theme-control select{max-width:68px}
+}
+
+.history-owner{font-size:12px;color:var(--accent-ink);white-space:nowrap}
